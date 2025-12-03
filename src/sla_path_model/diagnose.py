@@ -289,7 +289,8 @@ def diagnose_od_pair(
         mileage_bands=mileage_bands,
         timing_params=timing_params,
         cpt_generator=cpt_gen,
-        reference_date=reference_datetime
+        reference_date=reference_datetime,
+        reference_injection_time=run_settings.reference_injection_time
     )
 
     # Collect all paths with their timing results
@@ -352,12 +353,12 @@ def diagnose_od_pair(
         print('─' * 40)
 
         inj_local = utc_to_local(result.required_injection_utc, origin_fac.timezone)
-        del_local = utc_to_local(result.delivery_datetime_utc, dest_fac.timezone)
+        arr_local = utc_to_local(result.delivery_datetime_utc, dest_fac.timezone)
 
-        print(f"  Required Injection: {result.required_injection_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-        print(f"                      {inj_local.strftime('%Y-%m-%d %H:%M')} local")
-        print(f"  Delivery Deadline:  {result.delivery_datetime_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-        print(f"                      {del_local.strftime('%Y-%m-%d %H:%M')} local")
+        print(f"  Injection Time:  {result.required_injection_utc.strftime('%Y-%m-%d %H:%M')} UTC")
+        print(f"                   {inj_local.strftime('%Y-%m-%d %H:%M')} local")
+        print(f"  Arrival Time:    {result.delivery_datetime_utc.strftime('%Y-%m-%d %H:%M')} UTC")
+        print(f"                   {arr_local.strftime('%Y-%m-%d %H:%M')} local")
         print(f"\n  Total TIT: {result.tit_hours:.2f} hours ({result.tit_hours / 24:.2f} days)")
         print(f"  Sort Window Dwell: {result.sort_window_dwell_hours:.2f} hours")
         print(f"  CPT Dwell: {result.cpt_dwell_hours:.2f} hours")

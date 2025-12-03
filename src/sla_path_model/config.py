@@ -227,6 +227,7 @@ class RunSettings:
     max_path_touches: int
     max_path_atw_factor: float
     reference_injection_date: datetime
+    reference_injection_time: time
 
 
 @dataclass

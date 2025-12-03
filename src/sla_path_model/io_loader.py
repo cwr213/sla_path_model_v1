@@ -1,7 +1,7 @@
 """
 Input/Output loader: read Excel input file and parse into dataclasses.
 """
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -227,11 +227,24 @@ class InputLoader:
         else:
             ref_date = datetime(2025, 6, 15)
 
+        ref_time = settings.get("reference_injection_time")
+        if ref_time is None:
+            ref_time = time(18, 0)  # Default 18:00
+        elif isinstance(ref_time, str):
+            ref_time = parse_time_value(ref_time)
+        elif isinstance(ref_time, time):
+            pass
+        elif isinstance(ref_time, datetime):
+            ref_time = ref_time.time()
+        else:
+            ref_time = time(18, 0)
+
         run_settings = RunSettings(
             objective_type=objective_type,
             max_path_touches=int(settings.get("max_path_touches", 4)),
             max_path_atw_factor=float(settings.get("max_path_atw_factor", 1.5)),
-            reference_injection_date=ref_date
+            reference_injection_date=ref_date,
+            reference_injection_time=ref_time
         )
 
         logger.info(f"Loaded run settings: {run_settings}")
