@@ -65,6 +65,7 @@ class TimingEngine:
         current_time_utc = injection_utc
         total_sort_window_dwell = 0.0
         total_cpt_dwell = 0.0
+        all_arcs_active = True  # Track if all arcs use active CPTs
 
         is_od_equal = (path.origin == path.dest)
 
@@ -117,9 +118,13 @@ class TimingEngine:
 
                 # Find next CPT after current time
                 cpts = self.cpt_generator.get_cpts_for_arc(from_node, to_node)
-                cpt_departure_utc, cpt_dwell = self._find_next_cpt(
+                cpt_departure_utc, cpt_dwell, arc_is_active = self._find_next_cpt(
                     current_time_utc, cpts, from_fac, from_node, to_node
                 )
+
+                # Track if any arc uses inactive CPT
+                if not arc_is_active:
+                    all_arcs_active = False
 
                 # Calculate transit
                 distance = haversine_miles(from_fac.lat, from_fac.lon, to_fac.lat, to_fac.lon)
@@ -227,7 +232,8 @@ class TimingEngine:
             sla_met=False,
             sla_slack_hours=0,
             priority_weight=1.0,
-            steps=steps
+            steps=steps,
+            uses_only_active_arcs=all_arcs_active
         )
 
     def _find_next_cpt(
@@ -237,32 +243,36 @@ class TimingEngine:
             origin_fac: Facility,
             origin: str,
             dest: str
-    ) -> tuple[datetime, float]:
-        """Find the next CPT departure at or after ready_utc (forward-chaining)."""
+    ) -> tuple[datetime, float, bool]:
+        """
+        Find the next CPT departure at or after ready_utc (forward-chaining).
+        Returns (departure_utc, dwell_minutes, is_active).
+        """
         if not cpts:
-            return ready_utc, 0.0
+            return ready_utc, 0.0, False  # No CPT = not active
 
         ready_local = utc_to_local(ready_utc, origin_fac.timezone)
         search_date = ready_local.date()
 
-        cpt_datetimes = []
+        # Build list of (cpt_utc, is_active) tuples
+        cpt_candidates = []
         for cpt in cpts:
-            # Check today and future days
             for day_offset in [0, 1, 2, 3, 4]:
                 cpt_date = search_date + timedelta(days=day_offset)
                 cpt_local = datetime.combine(cpt_date, cpt.cpt_local)
                 cpt_utc = local_to_utc(cpt_local, cpt.timezone)
-                cpt_datetimes.append(cpt_utc)
+                if cpt_utc >= ready_utc:
+                    cpt_candidates.append((cpt_utc, cpt.is_active))
 
-        valid_cpts = [c for c in cpt_datetimes if c >= ready_utc]
-
-        if valid_cpts:
-            next_cpt = min(valid_cpts)
-            dwell_minutes = (next_cpt - ready_utc).total_seconds() / 60
-            return next_cpt, max(0, dwell_minutes)
+        if cpt_candidates:
+            # Sort by time and take earliest
+            cpt_candidates.sort(key=lambda x: x[0])
+            next_cpt_utc, is_active = cpt_candidates[0]
+            dwell_minutes = (next_cpt_utc - ready_utc).total_seconds() / 60
+            return next_cpt_utc, max(0, dwell_minutes), is_active
 
         logger.warning(f"No valid CPT found for arc {origin}->{dest}, using ready time")
-        return ready_utc, 0.0
+        return ready_utc, 0.0, False
 
     def _calculate_intermediate_processing_forward(
             self,

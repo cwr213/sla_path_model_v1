@@ -7,7 +7,7 @@ Diagnostic tool for analyzing path timing calculations.
 # =============================================================================
 INPUT_FILE = r"C:\Users\cwr21\OneDrive\Documents\python_data\python_projects\sla_path_model_v1\data\input_sla_model_v1.xlsx"
 ORIGIN = "BNA01"
-DEST = "BNA01"
+DEST = "BOS01"
 SCENARIO_ID = None  # None = use first scenario, or specify e.g. "2026_peak_paths_v1"
 # =============================================================================
 
@@ -363,6 +363,7 @@ def diagnose_od_pair(
         print(f"  Sort Window Dwell: {result.sort_window_dwell_hours:.2f} hours")
         print(f"  CPT Dwell: {result.cpt_dwell_hours:.2f} hours")
         print(f"  Total Dwell: {result.total_dwell_hours:.2f} hours")
+        print(f"  Active Arcs Only: {'Yes' if result.uses_only_active_arcs else 'No'}")
 
         # SLA check
         if commitment:

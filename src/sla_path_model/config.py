@@ -87,6 +87,7 @@ class CPT:
     cpt_local: time
     days_of_week: list[str]
     timezone: ZoneInfo
+    is_active: bool
 
     def cpt_utc_for_date(self, local_date: datetime) -> datetime:
         local_dt = datetime.combine(local_date.date(), self.cpt_local)
@@ -200,6 +201,7 @@ class PathTimingResult:
     sla_slack_hours: float
     priority_weight: float
     steps: list
+    uses_only_active_arcs: bool
 
 
 @dataclass

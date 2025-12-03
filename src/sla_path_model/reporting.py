@@ -62,6 +62,7 @@ class ReportBuilder:
                         "node_2": None,
                         "node_3": None,
                         "node_4": None,
+                        "node_5": None,
                         "path_type": "direct_injection",
                         "sort_level": "n/a",
                         "dest_sort_level": "n/a",
@@ -73,6 +74,7 @@ class ReportBuilder:
                         "sla_target_hours": 0,
                         "sla_met": True,
                         "sla_slack_hours": 0,
+                        "uses_only_active_arcs": True,
                         "pkgs_day": demand.pkgs_day,
                         "zone": demand.zone
                     })
@@ -94,6 +96,7 @@ class ReportBuilder:
                         "node_2": nodes[1] if len(nodes) > 1 else None,
                         "node_3": nodes[2] if len(nodes) > 2 else None,
                         "node_4": nodes[3] if len(nodes) > 3 else None,
+                        "node_5": nodes[4] if len(nodes) > 4 else None,
                         "path_type": timing.path.path_type.value,
                         "sort_level": timing.path.sort_level.value,
                         "dest_sort_level": timing.path.dest_sort_level.value,
@@ -105,6 +108,7 @@ class ReportBuilder:
                         "sla_target_hours": round(timing.sla_target_hours, 2),
                         "sla_met": timing.sla_met,
                         "sla_slack_hours": round(timing.sla_slack_hours, 2),
+                        "uses_only_active_arcs": timing.uses_only_active_arcs,
                         "pkgs_day": demand.pkgs_day,
                         "zone": demand.zone
                     })

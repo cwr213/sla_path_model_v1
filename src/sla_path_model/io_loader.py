@@ -1,6 +1,3 @@
-"""
-Input/Output loader: read Excel input file and parse into dataclasses.
-"""
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -176,7 +173,8 @@ class InputLoader:
                 cpt_sequence=int(row["cpt_sequence"]),
                 cpt_local=parse_time_value(row["cpt_local"]),
                 days_of_week=parse_days_of_week(row.get("days_of_week", "")),
-                timezone=tz
+                timezone=tz,
+                is_active=bool(int(row["active_arc"]))
             )
             cpts.append(cpt)
 
