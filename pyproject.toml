@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sla_path_model"
+version = "1.0.0"
+description = "Transit time feasibility model for parcel network path selection"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0.0,<3.0.0",
+    "numpy>=1.24.0,<2.0.0",
+    "openpyxl>=3.1.0,<4.0.0",
+    "xlsxwriter>=3.1.0,<4.0.0",
+    "tqdm>=4.65.0",
+    "pytz>=2024.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+```
+
+Your folder structure should look like:
+```
+sla_path_model_v1/
+├── pyproject.toml      ← new file here (project root)
+├── requirements
+├── scripts/
+│   └── run.py
+├── src/
+│   └── sla_path_model/
+│       ├── __init__.py
+│       ├── config.py
+│       ├── cpt_generator.py   ← new
+│       ├── demand_builder.py  ← new
+│       └── ...
+└── data/

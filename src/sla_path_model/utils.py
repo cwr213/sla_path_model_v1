@@ -1,7 +1,6 @@
-"""
-Shared utility functions.
-"""
+"""Shared utility functions for SLA path model."""
 import logging
+import sys
 from datetime import time
 from typing import Optional
 
@@ -9,37 +8,32 @@ import pandas as pd
 
 
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
-    """Configure and return logger for the application."""
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    return logging.getLogger("sla_path")
+    """Configure and return logger that writes to stdout."""
+    logger = logging.getLogger("sla_path")
+
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(level)
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    logger.setLevel(level)
+    return logger
 
 
 def parse_time_value(val) -> Optional[time]:
-    """
-    Parse a time value from Excel.
-
-    Excel stores times as datetime.time when read via openpyxl.
-    Also handles:
-    - Integer hours (22 -> 22:00)
-    - Integer HHMM format (2230 -> 22:30)
-    - Float fraction of day (0.9167 -> 22:00)
-    - String HH:MM or HH:MM:SS
-    """
-    if val is None:
-        return None
-    if pd.isna(val):
+    """Parse a time value from Excel into a time object."""
+    if val is None or pd.isna(val):
         return None
     if isinstance(val, time):
         return val
 
-    # Handle integer values
     if isinstance(val, (int, float)) and not hasattr(val, 'time'):
         if isinstance(val, float) and 0 <= val < 1:
-            # Fraction of day (Excel's internal time format)
             total_minutes = val * 24 * 60
             hour = int(total_minutes // 60)
             minute = int(total_minutes % 60)
@@ -47,10 +41,8 @@ def parse_time_value(val) -> Optional[time]:
 
         val_int = int(val)
         if 0 <= val_int <= 24:
-            # Plain hour (e.g., 22 -> 22:00, 6 -> 06:00)
             return time(val_int if val_int < 24 else 0, 0)
         elif 100 <= val_int <= 2400:
-            # HHMM format (e.g., 2230 -> 22:30, 600 -> 06:00)
             hour = val_int // 100
             minute = val_int % 100
             if hour >= 24:
@@ -60,7 +52,6 @@ def parse_time_value(val) -> Optional[time]:
             raise ValueError(f"Cannot parse integer time value: {val}")
 
     if isinstance(val, str):
-        # Fallback: try parsing HH:MM or HH:MM:SS string
         val = val.strip()
         if not val:
             return None
@@ -73,7 +64,6 @@ def parse_time_value(val) -> Optional[time]:
         except (ValueError, IndexError):
             raise ValueError(f"Cannot parse time value: {val}")
 
-    # Might be a datetime object
     if hasattr(val, 'time'):
         return val.time()
 
@@ -81,13 +71,9 @@ def parse_time_value(val) -> Optional[time]:
 
 
 def parse_days_of_week(val: str) -> list[str]:
-    """
-    Parse days of week from comma-separated string.
-
-    Expected format: "Mon,Tue,Wed,Thu,Fri" or "Mon,Tue,Wed,Thu,Fri,Sat,Sun"
-    """
+    """Parse days of week from comma-separated string."""
     if not val or pd.isna(val):
-        return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]  # Default to all days
+        return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     valid_days = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
     days = [d.strip() for d in str(val).split(",")]

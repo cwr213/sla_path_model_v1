@@ -5,7 +5,13 @@ SLA Path Model v1 - Main Entry Point
 Run transit time feasibility analysis for parcel network optimization.
 
 Usage:
-    python scripts/run_model.py [--input INPUT_FILE] [--output OUTPUT_FILE]
+    python scripts/run.py [--input INPUT_FILE] [--output OUTPUT_FILE]
+
+Output naming:
+    - If --output is specified, uses that path
+    - Otherwise, derives name from scenario_id(s) in input file
+      e.g., "scenario_2025_peak" -> "outputs/scenario_2025_peak.xlsx"
+      e.g., multiple scenarios -> "outputs/scenario_2025_offpeak_scenario_2025_peak.xlsx"
 """
 import argparse
 import sys
@@ -15,16 +21,49 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from sla_path.config import DEFAULT_INPUT_FILE, DEFAULT_OUTPUT_FILE
-from sla_path.io_loader import InputLoader
-from sla_path.validators import validate_inputs
-from sla_path.demand_builder import build_od_demand
-from sla_path.path_enumeration import enumerate_all_paths
-from sla_path.timing_engine import calculate_all_path_timings
-from sla_path.feasibility import check_all_feasibility
-from sla_path.reporting import build_all_reports
-from sla_path.write_outputs import write_outputs
-from sla_path.utils import setup_logging
+from sla_path_model.config import DEFAULT_INPUT_FILE, DEFAULT_OUTPUT_FILE
+from sla_path_model.io_loader import InputLoader
+from sla_path_model.validators import validate_inputs
+from sla_path_model.demand_builder import build_od_demand
+from sla_path_model.path_enumeration import enumerate_all_paths
+from sla_path_model.timing_engine import calculate_all_path_timings
+from sla_path_model.feasibility import check_all_feasibility
+from sla_path_model.reporting import build_all_reports
+from sla_path_model.write_outputs import write_outputs
+from sla_path_model.utils import setup_logging
+
+
+def derive_output_filename(scenarios_df, output_dir: str = "outputs") -> str:
+    """
+    Derive output filename from scenario_id(s) in the scenarios dataframe.
+
+    Args:
+        scenarios_df: DataFrame with scenario_id column
+        output_dir: Directory for output files
+
+    Returns:
+        Output file path like "outputs/scenario_2025_peak.xlsx"
+    """
+    scenario_ids = scenarios_df["scenario_id"].astype(str).unique().tolist()
+
+    if len(scenario_ids) == 1:
+        # Single scenario - use its ID directly
+        filename = f"{scenario_ids[0]}.xlsx"
+    else:
+        # Multiple scenarios - combine IDs (limit to avoid very long names)
+        if len(scenario_ids) <= 3:
+            combined = "_".join(scenario_ids)
+        else:
+            # Too many - use first two plus count
+            combined = f"{scenario_ids[0]}_{scenario_ids[1]}_and_{len(scenario_ids)-2}_more"
+        filename = f"{combined}.xlsx"
+
+    # Clean up filename (remove invalid characters)
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, '_')
+
+    return str(Path(output_dir) / filename)
 
 
 def main():
@@ -38,8 +77,13 @@ def main():
     )
     parser.add_argument(
         "--output", "-o",
-        default=DEFAULT_OUTPUT_FILE,
-        help=f"Output Excel file (default: {DEFAULT_OUTPUT_FILE})"
+        default=None,  # Changed to None - will derive from scenario_id if not specified
+        help="Output Excel file (default: derived from scenario_id)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs",
+        help="Output directory when deriving filename from scenario_id (default: outputs)"
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -64,6 +108,14 @@ def main():
         logger.info("Step 1: Loading inputs...")
         loader = InputLoader(args.input)
         data = loader.load_all()
+
+        # Determine output filename
+        if args.output:
+            output_path = args.output
+        else:
+            output_path = derive_output_filename(data["scenarios"], args.output_dir)
+
+        logger.info(f"Output will be written to: {output_path}")
 
         # Step 2: Validate inputs
         logger.info("Step 2: Validating inputs...")
@@ -95,12 +147,12 @@ def main():
 
         # Step 8: Write outputs
         logger.info("Step 8: Writing outputs...")
-        write_outputs(reports, args.output)
+        write_outputs(reports, output_path)
 
         elapsed = time.time() - start_time
         logger.info("=" * 60)
         logger.info(f"SLA Path Model v1 - Complete ({elapsed:.1f}s)")
-        logger.info(f"Output written to: {args.output}")
+        logger.info(f"Output written to: {output_path}")
         logger.info("=" * 60)
 
         # Print summary

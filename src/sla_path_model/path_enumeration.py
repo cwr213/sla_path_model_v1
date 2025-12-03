@@ -1,8 +1,4 @@
-"""
-Path enumeration: generate all candidate paths through the network.
-"""
-from typing import Optional
-
+"""Generate all candidate paths through the network."""
 from .config import (
     Facility, FacilityType, PathCandidate, PathType, SortLevel, RunSettings
 )
@@ -13,22 +9,15 @@ logger = setup_logging()
 
 
 class PathEnumerator:
-    """Generate candidate paths through the network."""
 
-    def __init__(
-            self,
-            facilities: dict[str, Facility],
-            run_settings: RunSettings
-    ):
+    def __init__(self, facilities: dict[str, Facility], run_settings: RunSettings):
         self.facilities = facilities
         self.max_path_touches = run_settings.max_path_touches
         self.max_atw_factor = run_settings.max_path_atw_factor
 
-        # Build facility type lookups
         self._build_facility_lookups()
 
     def _build_facility_lookups(self):
-        """Build lookups for facility types and relationships."""
         self.hubs = {
             name: fac for name, fac in self.facilities.items()
             if fac.facility_type == FacilityType.HUB
@@ -42,16 +31,13 @@ class PathEnumerator:
             if fac.facility_type == FacilityType.LAUNCH
         }
 
-        # Hub and hybrid facilities (can do sorting)
         self.sorting_facilities = {**self.hubs, **self.hybrids}
 
-        # Build parent hub mapping
         self.parent_hub = {}
         for name, fac in self.facilities.items():
             if fac.parent_hub_name:
                 self.parent_hub[name] = fac.parent_hub_name
 
-        # Build regional sort hub mapping
         self.regional_hub = {}
         for name, fac in self.facilities.items():
             if fac.regional_sort_hub:
@@ -62,23 +48,7 @@ class PathEnumerator:
             f"{len(self.launches)} launches"
         )
 
-    def enumerate_paths_for_od(
-            self,
-            origin: str,
-            dest: str
-    ) -> list[PathCandidate]:
-        """
-        Enumerate all valid paths from origin to destination.
-
-        Considers hub hierarchy rules and max_path_touches.
-
-        Args:
-            origin: Origin facility name (injection point)
-            dest: Destination facility name (delivery facility)
-
-        Returns:
-            List of PathCandidate objects, one per valid (path, sort_level) combination
-        """
+    def enumerate_paths_for_od(self, origin: str, dest: str) -> list[PathCandidate]:
         if origin not in self.facilities:
             raise ValueError(f"Unknown origin facility: {origin}")
         if dest not in self.facilities:
@@ -87,16 +57,17 @@ class PathEnumerator:
         origin_fac = self.facilities[origin]
         dest_fac = self.facilities[dest]
 
-        # Calculate direct distance for ATW filtering
         direct_miles = haversine_miles(
             origin_fac.lat, origin_fac.lon,
             dest_fac.lat, dest_fac.lon
         )
 
-        # Generate raw paths (without sort level consideration)
+        # O=D: Return single hardcoded path, no enumeration needed
+        if origin == dest:
+            return self._create_od_equal_path(origin, dest)
+
         raw_paths = self._enumerate_raw_paths(origin, dest)
 
-        # Expand each raw path into multiple candidates (one per valid sort level)
         candidates = []
         for path_nodes in raw_paths:
             path_candidates = self._expand_path_to_candidates(
@@ -117,22 +88,30 @@ class PathEnumerator:
 
         return valid_candidates
 
-    def _enumerate_raw_paths(self, origin: str, dest: str) -> list[list[str]]:
-        """
-        Enumerate raw paths (node sequences) from origin to destination.
+    def _create_od_equal_path(self, origin: str, dest: str) -> list[PathCandidate]:
+        """Create the single valid path for O=D scenarios."""
+        # O=D is always sort_group level, direct path, 0 miles
+        return [PathCandidate(
+            origin=origin,
+            dest=dest,
+            path_nodes=[origin, dest],
+            path_type=PathType.DIRECT,
+            sort_level=SortLevel.SORT_GROUP,
+            dest_sort_level=SortLevel.SORT_GROUP,
+            total_path_miles=0.0,
+            direct_miles=0.0,
+            atw_factor=1.0
+        )]
 
-        Generates:
-        - Direct paths (origin -> dest)
-        - 1-touch paths (origin -> intermediate -> dest)
-        - 2-touch paths (origin -> hub1 -> hub2 -> dest)
-        - 3-touch paths (origin -> hub1 -> hub2 -> hub3 -> dest)
-        """
+    def _enumerate_raw_paths(self, origin: str, dest: str) -> list[list[str]]:
+        """Enumerate raw paths. For non-direct, regional_sort_hub must be 2nd-to-last."""
         paths = []
+        dest_regional_hub = self.regional_hub.get(dest)
 
         # Direct path (always valid)
         paths.append([origin, dest])
 
-        # 1-touch paths
+        # 1-touch paths: O → H → D (H must be regional_sort_hub for REGION sort)
         if self.max_path_touches >= 2:
             for hub_name in self.sorting_facilities:
                 if hub_name != origin and hub_name != dest:
@@ -140,7 +119,7 @@ class PathEnumerator:
                     if self._is_valid_path_structure(path):
                         paths.append(path)
 
-        # 2-touch paths
+        # 2-touch paths: O → X → H → D (H must be regional_sort_hub for REGION sort)
         if self.max_path_touches >= 3:
             for hub1 in self.sorting_facilities:
                 if hub1 == origin or hub1 == dest:
@@ -152,7 +131,7 @@ class PathEnumerator:
                     if self._is_valid_path_structure(path):
                         paths.append(path)
 
-        # 3-touch paths
+        # 3-touch paths: O → X → Y → H → D
         if self.max_path_touches >= 4:
             for hub1 in self.sorting_facilities:
                 if hub1 == origin or hub1 == dest:
@@ -170,48 +149,31 @@ class PathEnumerator:
         return paths
 
     def _is_valid_path_structure(self, path: list[str]) -> bool:
-        """
-        Check if path adheres to hub hierarchy rules.
-
-        Rules:
-        1. Origin must be hub or hybrid (injection node)
-        2. Destination must be launch or hybrid (delivery facility)
-        3. Intermediate nodes must be hub or hybrid (sorting facilities)
-        4. Parent hub rule: if dest has a parent hub, path should go through it
-           (unless coming from same parent hub region)
-        """
         if len(path) < 2:
             return False
 
         origin = path[0]
         dest = path[-1]
 
-        # Check origin is injection capable
         origin_fac = self.facilities[origin]
         if origin_fac.facility_type not in (FacilityType.HUB, FacilityType.HYBRID):
             return False
 
-        # Check dest is delivery capable
         dest_fac = self.facilities[dest]
         if dest_fac.facility_type not in (FacilityType.LAUNCH, FacilityType.HYBRID):
             return False
 
-        # Check intermediates are sorting facilities
         for node in path[1:-1]:
             node_fac = self.facilities[node]
             if node_fac.facility_type not in (FacilityType.HUB, FacilityType.HYBRID):
                 return False
 
-        # Parent hub rule: if dest has parent hub, path should include it
-        # (unless origin is the parent hub or shares same parent)
         if dest in self.parent_hub:
             parent = self.parent_hub[dest]
             origin_parent = self.parent_hub.get(origin)
 
-            # Skip rule if origin shares same parent or IS the parent
             if origin != parent and origin_parent != parent:
                 if parent not in path:
-                    # Path doesn't go through dest's parent hub - invalid
                     return False
 
         return True
@@ -223,20 +185,10 @@ class PathEnumerator:
             dest: str,
             direct_miles: float
     ) -> list[PathCandidate]:
-        """
-        Expand a raw path into PathCandidate objects for each valid sort level.
-
-        Sort levels determine processing at intermediate hubs:
-        - region: crossdock at intermediates (fastest)
-        - market: partial sort at intermediates
-        - sort_group: full sort at intermediates (most efficient for consolidation)
-        """
-        # Calculate path metrics
         total_miles, leg_miles = calculate_path_distance(path_nodes, self.facilities)
         atw_factor = calculate_atw_factor(total_miles, direct_miles)
 
-        # Determine path type
-        num_touches = len(path_nodes) - 1  # Number of facility touches excluding origin
+        num_touches = len(path_nodes) - 1
         path_type = {
             1: PathType.DIRECT,
             2: PathType.ONE_TOUCH,
@@ -244,51 +196,73 @@ class PathEnumerator:
             4: PathType.THREE_TOUCH
         }.get(num_touches, PathType.THREE_TOUCH)
 
-        # Generate candidates for each valid sort level
+        is_direct = (num_touches == 1)
+        dest_regional_hub = self.regional_hub.get(dest)
+        second_to_last = path_nodes[-2] if len(path_nodes) >= 2 else None
+
         candidates = []
 
-        for sort_level in SortLevel:
-            # Validate sort level is achievable for this path
-            if self._is_sort_level_valid(path_nodes, sort_level):
-                candidate = PathCandidate(
-                    origin=origin,
-                    dest=dest,
-                    path_nodes=path_nodes,
-                    path_type=path_type,
-                    sort_level=sort_level,
-                    total_path_miles=total_miles,
-                    direct_miles=direct_miles,
-                    atw_factor=atw_factor
-                )
-                candidates.append(candidate)
+        # SORT_GROUP: Valid for any path
+        # dest_sort_level = SORT_GROUP (no LM sort needed)
+        candidates.append(PathCandidate(
+            origin=origin,
+            dest=dest,
+            path_nodes=path_nodes,
+            path_type=path_type,
+            sort_level=SortLevel.SORT_GROUP,
+            dest_sort_level=SortLevel.SORT_GROUP,
+            total_path_miles=total_miles,
+            direct_miles=direct_miles,
+            atw_factor=atw_factor
+        ))
+
+        # MARKET: Valid for any path
+        # dest_sort_level = MARKET (LM sort needed)
+        candidates.append(PathCandidate(
+            origin=origin,
+            dest=dest,
+            path_nodes=path_nodes,
+            path_type=path_type,
+            sort_level=SortLevel.MARKET,
+            dest_sort_level=SortLevel.MARKET,
+            total_path_miles=total_miles,
+            direct_miles=direct_miles,
+            atw_factor=atw_factor
+        ))
+
+        # REGION: Only valid for non-direct paths where 2nd-to-last is regional_sort_hub
+        if not is_direct and dest_regional_hub and second_to_last == dest_regional_hub:
+            # Enumerate two variants: hub sorts to MARKET or SORT_GROUP
+            candidates.append(PathCandidate(
+                origin=origin,
+                dest=dest,
+                path_nodes=path_nodes,
+                path_type=path_type,
+                sort_level=SortLevel.REGION,
+                dest_sort_level=SortLevel.MARKET,  # Hub sorts to market, dest does LM sort
+                total_path_miles=total_miles,
+                direct_miles=direct_miles,
+                atw_factor=atw_factor
+            ))
+            candidates.append(PathCandidate(
+                origin=origin,
+                dest=dest,
+                path_nodes=path_nodes,
+                path_type=path_type,
+                sort_level=SortLevel.REGION,
+                dest_sort_level=SortLevel.SORT_GROUP,  # Hub sorts to sort_group, no LM sort
+                total_path_miles=total_miles,
+                direct_miles=direct_miles,
+                atw_factor=atw_factor
+            ))
 
         return candidates
-
-    def _is_sort_level_valid(self, path_nodes: list[str], sort_level: SortLevel) -> bool:
-        """
-        Check if a sort level is achievable for a given path.
-
-        For now, all sort levels are considered valid for all paths.
-        Future enhancement: check if destination supports the sort level.
-        """
-        # All sort levels valid for all paths in v1
-        return True
 
 
 def enumerate_all_paths(
         data: dict,
-        od_demands: list  # List of ODDemand
+        od_demands: list
 ) -> dict[tuple[str, str], list[PathCandidate]]:
-    """
-    Enumerate paths for all unique OD pairs in demand.
-
-    Args:
-        data: Dictionary from InputLoader.load_all()
-        od_demands: List of ODDemand objects
-
-    Returns:
-        Dictionary mapping (origin, dest) to list of PathCandidate objects
-    """
     enumerator = PathEnumerator(
         facilities=data["facilities"],
         run_settings=data["run_settings"]
@@ -297,12 +271,11 @@ def enumerate_all_paths(
     # Get unique OD pairs (excluding direct injection zone 0)
     od_pairs = set()
     for od in od_demands:
-        if od.zone > 0:  # Middle mile only (direct injection doesn't need paths)
+        if od.zone > 0:
             od_pairs.add((od.origin, od.dest))
 
     logger.info(f"Enumerating paths for {len(od_pairs)} unique OD pairs")
 
-    # Enumerate paths for each OD pair
     od_paths = {}
     for origin, dest in od_pairs:
         candidates = enumerator.enumerate_paths_for_od(origin, dest)

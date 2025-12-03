@@ -3,7 +3,6 @@ Input/Output loader: read Excel input file and parse into dataclasses.
 """
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -18,30 +17,33 @@ logger = setup_logging()
 
 
 class InputLoader:
-    """Load and parse input Excel file."""
+
+    REQUIRED_SHEETS = [
+        "facilities",
+        "zips",
+        "demand",
+        "injection_distribution",
+        "scenarios",
+        "mileage_bands",
+        "timing_params",
+        "service_commitments",
+        "run_settings"
+    ]
 
     def __init__(self, filepath: str):
         self.filepath = Path(filepath)
         if not self.filepath.exists():
             raise FileNotFoundError(f"Input file not found: {filepath}")
 
-        # Load all sheets
         self.excel = pd.ExcelFile(filepath)
         self._validate_required_sheets()
 
     def _validate_required_sheets(self):
-        """Check that all required sheets exist."""
-        required = [
-            "facilities", "zips", "demand", "injection_distribution",
-            "scenarios", "mileage_bands", "timing_params", "service_commitments",
-            "run_settings"
-        ]
-        missing = [s for s in required if s not in self.excel.sheet_names]
+        missing = [s for s in self.REQUIRED_SHEETS if s not in self.excel.sheet_names]
         if missing:
             raise ValueError(f"Missing required sheets: {missing}")
 
     def load_facilities(self) -> dict[str, Facility]:
-        """Load facilities sheet into dict of Facility objects."""
         df = pd.read_excel(self.excel, sheet_name="facilities")
 
         facilities = {}
@@ -60,8 +62,7 @@ class InputLoader:
                 lon=float(row["lon"]),
                 timezone=tz,
                 parent_hub_name=str(row["parent_hub_name"]).strip() if pd.notna(row.get("parent_hub_name")) else None,
-                regional_sort_hub=str(row["regional_sort_hub"]).strip() if pd.notna(
-                    row.get("regional_sort_hub")) else None,
+                regional_sort_hub=str(row["regional_sort_hub"]).strip() if pd.notna(row.get("regional_sort_hub")) else None,
                 is_injection_node=bool(row.get("is_injection_node", False)),
                 mm_sort_start_local=parse_time_value(row.get("mm_sort_start_local")),
                 mm_sort_end_local=parse_time_value(row.get("mm_sort_end_local")),
@@ -70,10 +71,8 @@ class InputLoader:
                 outbound_window_start_local=parse_time_value(row.get("outbound_window_start_local")),
                 outbound_window_end_local=parse_time_value(row.get("outbound_window_end_local")),
                 outbound_cpt_count=int(row["outbound_cpt_count"]) if pd.notna(row.get("outbound_cpt_count")) else None,
-                max_inbound_trucks_per_hour=float(row["max_inbound_trucks_per_hour"]) if pd.notna(
-                    row.get("max_inbound_trucks_per_hour")) else None,
-                max_outbound_trucks_per_hour=float(row["max_outbound_trucks_per_hour"]) if pd.notna(
-                    row.get("max_outbound_trucks_per_hour")) else None,
+                max_inbound_trucks_per_hour=float(row["max_inbound_trucks_per_hour"]) if pd.notna(row.get("max_inbound_trucks_per_hour")) else None,
+                max_outbound_trucks_per_hour=float(row["max_outbound_trucks_per_hour"]) if pd.notna(row.get("max_outbound_trucks_per_hour")) else None,
             )
             facilities[name] = facility
 
@@ -81,23 +80,19 @@ class InputLoader:
         return facilities
 
     def load_zips(self) -> pd.DataFrame:
-        """Load zips sheet."""
         df = pd.read_excel(self.excel, sheet_name="zips")
         df["zip"] = df["zip"].astype(str).str.zfill(5)
         logger.info(f"Loaded {len(df)} ZIP codes")
         return df
 
     def load_demand(self) -> pd.DataFrame:
-        """Load demand sheet."""
         df = pd.read_excel(self.excel, sheet_name="demand")
         logger.info(f"Loaded demand data for {len(df)} year(s)")
         return df
 
     def load_injection_distribution(self) -> pd.DataFrame:
-        """Load injection_distribution sheet."""
         df = pd.read_excel(self.excel, sheet_name="injection_distribution")
 
-        # Validate shares sum to ~1.0
         total_share = df["absolute_share"].sum()
         if abs(total_share - 1.0) > 0.01:
             logger.warning(f"Injection distribution shares sum to {total_share:.3f}, expected 1.0")
@@ -106,13 +101,11 @@ class InputLoader:
         return df
 
     def load_scenarios(self) -> pd.DataFrame:
-        """Load scenarios sheet."""
         df = pd.read_excel(self.excel, sheet_name="scenarios")
         logger.info(f"Loaded {len(df)} scenarios")
         return df
 
     def load_mileage_bands(self) -> list[MileageBand]:
-        """Load mileage_bands sheet into list of MileageBand objects."""
         df = pd.read_excel(self.excel, sheet_name="mileage_bands")
 
         bands = []
@@ -126,13 +119,11 @@ class InputLoader:
             )
             bands.append(band)
 
-        # Sort by zone
         bands.sort(key=lambda b: b.zone)
         logger.info(f"Loaded {len(bands)} mileage bands")
         return bands
 
     def load_timing_params(self) -> TimingParams:
-        """Load timing_params sheet into TimingParams object."""
         df = pd.read_excel(self.excel, sheet_name="timing_params")
 
         params = {}
@@ -163,11 +154,6 @@ class InputLoader:
         return timing
 
     def load_arc_cpts(self, facilities: dict[str, Facility]) -> list[CPT]:
-        """
-        Load arc_cpts sheet (optional overrides) into list of CPT objects.
-
-        Falls back to empty list if sheet doesn't exist.
-        """
         if "arc_cpts" not in self.excel.sheet_names:
             logger.info("No arc_cpts sheet found, will generate CPTs from facility outbound windows")
             return []
@@ -179,7 +165,6 @@ class InputLoader:
             origin = str(row["origin"]).strip()
             dest = str(row["dest"]).strip()
 
-            # Get timezone from origin facility
             if origin not in facilities:
                 raise ValueError(f"arc_cpts references unknown origin facility: {origin}")
 
@@ -199,7 +184,6 @@ class InputLoader:
         return cpts
 
     def load_service_commitments(self) -> list[ServiceCommitment]:
-        """Load service_commitments sheet into list of ServiceCommitment objects."""
         df = pd.read_excel(self.excel, sheet_name="service_commitments")
 
         commitments = []
@@ -218,7 +202,6 @@ class InputLoader:
         return commitments
 
     def load_run_settings(self) -> RunSettings:
-        """Load run_settings sheet into RunSettings object."""
         df = pd.read_excel(self.excel, sheet_name="run_settings")
 
         settings = {}
@@ -227,22 +210,21 @@ class InputLoader:
             value = row["value"]
             settings[key] = value
 
-        # Parse objective type
         obj_type_str = str(settings.get("objective_type", "weighted_sla")).lower().strip()
         try:
             objective_type = ObjectiveType(obj_type_str)
         except ValueError:
             raise ValueError(
-                f"Invalid objective_type: {obj_type_str}. Must be one of {[e.value for e in ObjectiveType]}")
+                f"Invalid objective_type: {obj_type_str}. "
+                f"Must be one of {[e.value for e in ObjectiveType]}"
+            )
 
-        # Parse reference injection date
         ref_date = settings.get("reference_injection_date")
         if isinstance(ref_date, str):
             ref_date = datetime.fromisoformat(ref_date)
         elif isinstance(ref_date, datetime):
             pass
         else:
-            # Default to a standard date
             ref_date = datetime(2025, 6, 15)
 
         run_settings = RunSettings(
@@ -256,7 +238,6 @@ class InputLoader:
         return run_settings
 
     def load_all(self) -> dict:
-        """Load all input data into a dictionary."""
         facilities = self.load_facilities()
 
         return {

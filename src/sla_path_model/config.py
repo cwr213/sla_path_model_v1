@@ -1,29 +1,20 @@
-"""
-Configuration: constants, enums, and dataclasses for SLA Path Model.
-"""
-from dataclasses import dataclass, field
+"""Configuration: constants, enums, and dataclasses for SLA Path Model."""
+from dataclasses import dataclass
 from datetime import datetime, time
 from enum import Enum
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 
-# =============================================================================
-# CONSTANTS
-# =============================================================================
 EARTH_RADIUS_MILES = 3958.756
 MINUTES_PER_HOUR = 60
 HOURS_PER_DAY = 24
 MINUTES_PER_DAY = 1440
 
-# Default input/output paths
 DEFAULT_INPUT_FILE = "data/input_sla_model_v1.xlsx"
 DEFAULT_OUTPUT_FILE = "outputs/output_sla_model_v1.xlsx"
 
 
-# =============================================================================
-# ENUMS
-# =============================================================================
 class FacilityType(str, Enum):
     HUB = "hub"
     HYBRID = "hybrid"
@@ -61,12 +52,8 @@ class StepType(str, Enum):
     LAST_MILE_SORT = "last_mile_sort"
 
 
-# =============================================================================
-# DATACLASSES
-# =============================================================================
 @dataclass
 class TimingParams:
-    """Global timing parameters from timing_params sheet."""
     induction_sort_minutes: float
     middle_mile_crossdock_minutes: float
     middle_mile_sort_minutes: float
@@ -75,22 +62,18 @@ class TimingParams:
 
 @dataclass
 class SortWindow:
-    """Represents a sort window at a facility (can cross midnight)."""
     start_local: time
     end_local: time
     timezone: ZoneInfo
 
     def crosses_midnight(self) -> bool:
-        """Check if window spans midnight (e.g., 22:00 to 06:00)."""
         return self.end_local < self.start_local
 
     def duration_minutes(self) -> float:
-        """Calculate window duration in minutes, handling midnight crossing."""
         start_mins = self.start_local.hour * 60 + self.start_local.minute
         end_mins = self.end_local.hour * 60 + self.end_local.minute
 
         if self.crosses_midnight():
-            # e.g., 22:00 to 06:00 = (24:00 - 22:00) + 06:00 = 8 hours
             return (MINUTES_PER_DAY - start_mins) + end_mins
         else:
             return end_mins - start_mins
@@ -98,16 +81,14 @@ class SortWindow:
 
 @dataclass
 class CPT:
-    """Critical Pull Time - a departure event from a facility."""
     origin: str
     dest: str
     cpt_sequence: int
     cpt_local: time
-    days_of_week: list[str]  # e.g., ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    days_of_week: list[str]
     timezone: ZoneInfo
 
     def cpt_utc_for_date(self, local_date: datetime) -> datetime:
-        """Convert CPT to UTC datetime for a specific date."""
         local_dt = datetime.combine(local_date.date(), self.cpt_local)
         local_dt = local_dt.replace(tzinfo=self.timezone)
         return local_dt.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
@@ -115,39 +96,22 @@ class CPT:
 
 @dataclass
 class ServiceCommitment:
-    """SLA commitment for an origin-destination pair or zone."""
-    origin: str  # "*" means all
-    dest: str    # "*" means all
-    zone: Optional[int]  # None if origin/dest specific
+    origin: str
+    dest: str
+    zone: Optional[int]
     sla_days: int
     sla_buffer_days: float
     priority_weight: float
 
     def matches(self, origin: str, dest: str, zone: int) -> bool:
-        """Check if this commitment applies to a given OD pair and zone."""
         origin_match = (self.origin == "*" or self.origin == origin)
         dest_match = (self.dest == "*" or self.dest == dest)
         zone_match = (self.zone is None or self.zone == zone)
         return origin_match and dest_match and zone_match
 
-    def specificity_score(self) -> int:
-        """
-        Higher score = more specific commitment.
-        Used to prioritize: specific OD > zone-based > default.
-        """
-        score = 0
-        if self.origin != "*":
-            score += 2
-        if self.dest != "*":
-            score += 2
-        if self.zone is not None:
-            score += 1
-        return score
-
 
 @dataclass
 class MileageBand:
-    """Zone definition with transit parameters."""
     zone: int
     mileage_band_min: float
     mileage_band_max: float
@@ -157,7 +121,6 @@ class MileageBand:
 
 @dataclass
 class Facility:
-    """Facility with all operational parameters."""
     name: str
     facility_type: FacilityType
     lat: float
@@ -167,25 +130,20 @@ class Facility:
     regional_sort_hub: Optional[str]
     is_injection_node: bool
 
-    # Middle mile sort window
     mm_sort_start_local: Optional[time]
     mm_sort_end_local: Optional[time]
 
-    # Last mile sort window (end = delivery cutoff)
     lm_sort_start_local: Optional[time]
     lm_sort_end_local: Optional[time]
 
-    # Outbound window for CPT generation
     outbound_window_start_local: Optional[time]
     outbound_window_end_local: Optional[time]
     outbound_cpt_count: Optional[int]
 
-    # Capacity constraints
     max_inbound_trucks_per_hour: Optional[float]
     max_outbound_trucks_per_hour: Optional[float]
 
     def get_mm_sort_window(self) -> Optional[SortWindow]:
-        """Get middle mile sort window if defined."""
         if self.mm_sort_start_local and self.mm_sort_end_local:
             return SortWindow(
                 start_local=self.mm_sort_start_local,
@@ -195,7 +153,6 @@ class Facility:
         return None
 
     def get_lm_sort_window(self) -> Optional[SortWindow]:
-        """Get last mile sort window if defined."""
         if self.lm_sort_start_local and self.lm_sort_end_local:
             return SortWindow(
                 start_local=self.lm_sort_start_local,
@@ -205,7 +162,6 @@ class Facility:
         return None
 
     def get_outbound_window(self) -> Optional[SortWindow]:
-        """Get outbound window if defined."""
         if self.outbound_window_start_local and self.outbound_window_end_local:
             return SortWindow(
                 start_local=self.outbound_window_start_local,
@@ -217,20 +173,19 @@ class Facility:
 
 @dataclass
 class PathCandidate:
-    """A candidate path through the network."""
     origin: str
     dest: str
-    path_nodes: list[str]  # e.g., ["PHL", "ONT", "LAX1"]
+    path_nodes: list[str]
     path_type: PathType
-    sort_level: SortLevel
+    sort_level: SortLevel           # Sort level at origin
+    dest_sort_level: SortLevel      # Sort level arriving at destination
     total_path_miles: float
     direct_miles: float
-    atw_factor: float  # total_path_miles / direct_miles
+    atw_factor: float
 
 
 @dataclass
 class PathTimingResult:
-    """Complete timing result for a path."""
     path: PathCandidate
     tit_hours: float
     sort_window_dwell_hours: float
@@ -244,12 +199,11 @@ class PathTimingResult:
     sla_met: bool
     sla_slack_hours: float
     priority_weight: float
-    steps: list  # List of PathStep dataclasses
+    steps: list
 
 
 @dataclass
 class PathStep:
-    """Individual step in a path timing breakdown."""
     step_sequence: int
     step_type: StepType
     from_facility: Optional[str]
@@ -269,36 +223,28 @@ class PathStep:
 
 @dataclass
 class RunSettings:
-    """Model run configuration from run_settings sheet."""
     objective_type: ObjectiveType
-    max_path_touches: int  # 4 = direct + up to 3 intermediates
-    max_path_atw_factor: float  # e.g., 1.5
+    max_path_touches: int
+    max_path_atw_factor: float
     reference_injection_date: datetime
 
 
 @dataclass
 class ODDemand:
-    """Demand for an origin-destination pair."""
     scenario_id: str
     origin: str
     dest: str
     pkgs_day: float
     zone: int
     flow_type: FlowType
-    day_type: str  # "offpeak" or "peak"
+    day_type: str
 
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
 
 def time_to_minutes(t: time) -> float:
-    """Convert time to minutes since midnight."""
     return t.hour * MINUTES_PER_HOUR + t.minute + t.second / 60
 
 
 def minutes_to_time(minutes: float) -> time:
-    """Convert minutes since midnight to time (wraps at 24 hours)."""
     minutes = minutes % MINUTES_PER_DAY
     hours = int(minutes // MINUTES_PER_HOUR)
     mins = int(minutes % MINUTES_PER_HOUR)
@@ -307,14 +253,6 @@ def minutes_to_time(minutes: float) -> time:
 
 
 def parse_days_of_week(days_str: Optional[str]) -> list[str]:
-    """
-    Parse comma-separated day names into validated list.
-    Empty/None = all days (represented as empty list).
-
-    Examples:
-        "Mon,Wed,Fri" -> ["Mon", "Wed", "Fri"]
-        "" or None -> []  (means all days)
-    """
     valid_days = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 
     if not days_str or not days_str.strip():
@@ -331,5 +269,4 @@ def parse_days_of_week(days_str: Optional[str]) -> list[str]:
 
 
 def get_day_name(dt: datetime) -> str:
-    """Get day name (Mon, Tue, etc.) from datetime."""
     return dt.strftime("%a")
