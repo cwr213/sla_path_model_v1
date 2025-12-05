@@ -141,9 +141,14 @@ def main():
             data["service_commitments"]
         )
 
-        # Step 7: Build reports
+        # Step 7: Build reports (with top N filtering from run_settings)
         logger.info("Step 7: Building reports...")
-        reports = build_all_reports(od_demands, od_timings)
+        run_settings = data["run_settings"]
+        reports = build_all_reports(
+            od_demands,
+            od_timings,
+            top_paths_per_sort_level=run_settings.top_paths_per_sort_level
+        )
 
         # Step 8: Write outputs
         logger.info("Step 8: Writing outputs...")

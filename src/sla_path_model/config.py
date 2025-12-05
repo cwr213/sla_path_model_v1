@@ -28,14 +28,15 @@ class SortLevel(str, Enum):
 
 
 class PathType(str, Enum):
-    DIRECT = "direct"
-    ONE_TOUCH = "1_touch"
-    TWO_TOUCH = "2_touch"
-    THREE_TOUCH = "3_touch"
+    TWO_TOUCH = "2_touch"      # A → B (origin + dest = 2 facilities)
+    THREE_TOUCH = "3_touch"    # A → H → B (3 facilities)
+    FOUR_TOUCH = "4_touch"     # A → H1 → H2 → B (4 facilities)
+    FIVE_TOUCH = "5_touch"     # A → H1 → H2 → H3 → B (5 facilities)
 
 
 class FlowType(str, Enum):
     DIRECT_INJECTION = "direct_injection"
+    ZONE_SKIP = "zone_skip"
     MIDDLE_MILE = "middle_mile"
 
 
@@ -230,6 +231,7 @@ class RunSettings:
     max_path_atw_factor: float
     reference_injection_date: datetime
     reference_injection_time: time
+    top_paths_per_sort_level: int  # Top N paths to keep per OD × sort_level
 
 
 @dataclass
