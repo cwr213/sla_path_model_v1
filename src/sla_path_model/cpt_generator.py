@@ -88,7 +88,8 @@ class CPTGenerator:
                 cpt_sequence=seq,
                 cpt_local=minutes_to_time(int(cpt_mins)),
                 days_of_week=[],
-                timezone=facility.timezone
+                timezone=facility.timezone,
+                is_active=True  # Generated CPTs default to active
             )
             cpts.append(cpt)
 
@@ -107,7 +108,8 @@ class CPTGenerator:
                     cpt_sequence=cpt.cpt_sequence,
                     cpt_local=cpt.cpt_local,
                     days_of_week=cpt.days_of_week,
-                    timezone=cpt.timezone
+                    timezone=cpt.timezone,
+                    is_active=cpt.is_active
                 )
                 for cpt in facility_cpts
             ]
