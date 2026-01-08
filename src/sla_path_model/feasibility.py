@@ -156,10 +156,15 @@ def check_all_feasibility(
     checker = FeasibilityChecker(service_commitments)
 
     # Build zone lookup from demands
+    # Use the MM/ZS zone (zone > 0) for path feasibility, since paths only apply to MM/ZS flows
+    # DI (zone 0) doesn't have paths - it's handled separately in reporting
     od_zones = {}
     for demand in od_demands:
         key = (demand.origin, demand.dest)
-        od_zones[key] = demand.zone
+        # Only update if we don't have a zone yet, or if this is a non-DI zone
+        # This ensures MM/ZS zone takes precedence over DI zone 0
+        if key not in od_zones or demand.zone > 0:
+            od_zones[key] = demand.zone
 
     # Check each path
     total_paths = sum(len(timings) for timings in od_timings.values())

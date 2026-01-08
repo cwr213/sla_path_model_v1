@@ -90,12 +90,12 @@ class PathEnumerator:
 
     def _create_od_equal_path(self, origin: str, dest: str) -> list[PathCandidate]:
         """Create the single valid path for O=D scenarios."""
-        # O=D is always sort_group level, direct path, 0 miles
+        # O=D is always sort_group level, 2-touch path (origin + dest same facility)
         return [PathCandidate(
             origin=origin,
             dest=dest,
             path_nodes=[origin, dest],
-            path_type=PathType.DIRECT,
+            path_type=PathType.TWO_TOUCH,
             sort_level=SortLevel.SORT_GROUP,
             dest_sort_level=SortLevel.SORT_GROUP,
             total_path_miles=0.0,
@@ -104,23 +104,31 @@ class PathEnumerator:
         )]
 
     def _enumerate_raw_paths(self, origin: str, dest: str) -> list[list[str]]:
-        """Enumerate raw paths. For non-direct, regional_sort_hub must be 2nd-to-last."""
+        """
+        Enumerate raw paths based on max_path_touches.
+
+        Touch count = number of facilities in path:
+        - 2-touch: O → D (2 nodes)
+        - 3-touch: O → H → D (3 nodes)
+        - 4-touch: O → H1 → H2 → D (4 nodes)
+        - 5-touch: O → H1 → H2 → H3 → D (5 nodes)
+        """
         paths = []
-        dest_regional_hub = self.regional_hub.get(dest)
 
-        # Direct path (always valid)
-        paths.append([origin, dest])
-
-        # 1-touch paths: O → H → D (H must be regional_sort_hub for REGION sort)
+        # 2-touch: Direct path (always valid if max_path_touches >= 2)
         if self.max_path_touches >= 2:
+            paths.append([origin, dest])
+
+        # 3-touch: O → H → D
+        if self.max_path_touches >= 3:
             for hub_name in self.sorting_facilities:
                 if hub_name != origin and hub_name != dest:
                     path = [origin, hub_name, dest]
                     if self._is_valid_path_structure(path):
                         paths.append(path)
 
-        # 2-touch paths: O → X → H → D (H must be regional_sort_hub for REGION sort)
-        if self.max_path_touches >= 3:
+        # 4-touch: O → H1 → H2 → D
+        if self.max_path_touches >= 4:
             for hub1 in self.sorting_facilities:
                 if hub1 == origin or hub1 == dest:
                     continue
@@ -131,8 +139,8 @@ class PathEnumerator:
                     if self._is_valid_path_structure(path):
                         paths.append(path)
 
-        # 3-touch paths: O → X → Y → H → D
-        if self.max_path_touches >= 4:
+        # 5-touch: O → H1 → H2 → H3 → D
+        if self.max_path_touches >= 5:
             for hub1 in self.sorting_facilities:
                 if hub1 == origin or hub1 == dest:
                     continue
@@ -188,15 +196,15 @@ class PathEnumerator:
         total_miles, leg_miles = calculate_path_distance(path_nodes, self.facilities)
         atw_factor = calculate_atw_factor(total_miles, direct_miles)
 
-        num_touches = len(path_nodes) - 1
+        num_touches = len(path_nodes)
         path_type = {
-            1: PathType.DIRECT,
-            2: PathType.ONE_TOUCH,
-            3: PathType.TWO_TOUCH,
-            4: PathType.THREE_TOUCH
-        }.get(num_touches, PathType.THREE_TOUCH)
+            2: PathType.TWO_TOUCH,
+            3: PathType.THREE_TOUCH,
+            4: PathType.FOUR_TOUCH,
+            5: PathType.FIVE_TOUCH
+        }.get(num_touches, PathType.FIVE_TOUCH)
 
-        is_direct = (num_touches == 1)
+        is_direct = (num_touches == 2)
         dest_regional_hub = self.regional_hub.get(dest)
         second_to_last = path_nodes[-2] if len(path_nodes) >= 2 else None
 

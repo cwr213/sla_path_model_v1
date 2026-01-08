@@ -1,6 +1,3 @@
-"""
-Input/Output loader: read Excel input file and parse into dataclasses.
-"""
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -176,7 +173,8 @@ class InputLoader:
                 cpt_sequence=int(row["cpt_sequence"]),
                 cpt_local=parse_time_value(row["cpt_local"]),
                 days_of_week=parse_days_of_week(row.get("days_of_week", "")),
-                timezone=tz
+                timezone=tz,
+                is_active=bool(int(row["active_arc"]))
             )
             cpts.append(cpt)
 
@@ -239,12 +237,20 @@ class InputLoader:
         else:
             ref_time = time(18, 0)
 
+        # Top N paths per OD × sort_level (default 3 if not specified)
+        top_paths = settings.get("top_paths_per_sort_level")
+        if top_paths is None or pd.isna(top_paths):
+            top_paths = 3
+        else:
+            top_paths = int(top_paths)
+
         run_settings = RunSettings(
             objective_type=objective_type,
             max_path_touches=int(settings.get("max_path_touches", 4)),
             max_path_atw_factor=float(settings.get("max_path_atw_factor", 1.5)),
             reference_injection_date=ref_date,
-            reference_injection_time=ref_time
+            reference_injection_time=ref_time,
+            top_paths_per_sort_level=top_paths
         )
 
         logger.info(f"Loaded run settings: {run_settings}")
