@@ -138,12 +138,11 @@ class ReportBuilder:
                 else:
                     demand_by_od[key]['zone_mm_zs'] = demand.zone
 
-            # Build path rows with consolidated demand
+            # Build path rows with demand allocated to appropriate path types
             for (origin, dest), demand_info in demand_by_od.items():
                 pkgs_mm = demand_info[FlowType.MIDDLE_MILE]
                 pkgs_zs = demand_info[FlowType.ZONE_SKIP]
                 pkgs_di = demand_info[FlowType.DIRECT_INJECTION]
-                pkgs_day = pkgs_mm + pkgs_zs + pkgs_di
                 zone_mm_zs = demand_info['zone_mm_zs']
                 zone_di = demand_info['zone_di']
 
@@ -155,9 +154,38 @@ class ReportBuilder:
                     logger.warning(f"No paths found for OD {origin}->{dest} with demand")
                     continue
 
-                # Output each unique path once with consolidated demand
+                # Output each unique path once with demand appropriate to that path type
                 for timing in timings:
                     nodes = timing.path.path_nodes
+                    path_type = timing.path.path_type
+
+                    # Allocate demand based on path type
+                    # - DI paths: only DI demand
+                    # - od_mm paths: only MM + ZS demand (O=D with zone 1+)
+                    # - Networked paths: only MM + ZS demand
+                    if path_type == PathType.DIRECT_INJECTION:
+                        path_pkgs_day = pkgs_di
+                        path_pkgs_mm = 0.0
+                        path_pkgs_zs = 0.0
+                        path_pkgs_di = pkgs_di
+                        path_zone = zone_di
+                    elif path_type == PathType.OD_MM:
+                        path_pkgs_day = pkgs_mm + pkgs_zs
+                        path_pkgs_mm = pkgs_mm
+                        path_pkgs_zs = pkgs_zs
+                        path_pkgs_di = 0.0
+                        path_zone = zone_mm_zs
+                    else:
+                        # Networked paths (2_touch, 3_touch, etc.)
+                        path_pkgs_day = pkgs_mm + pkgs_zs
+                        path_pkgs_mm = pkgs_mm
+                        path_pkgs_zs = pkgs_zs
+                        path_pkgs_di = 0.0
+                        path_zone = zone_mm_zs
+
+                    # Skip paths with no demand
+                    if path_pkgs_day < 0.01:
+                        continue
 
                     # Calculate TIT breakdown from steps
                     tit_sort_mins = 0.0
@@ -182,7 +210,7 @@ class ReportBuilder:
                         "node_3": nodes[2] if len(nodes) > 2 else None,
                         "node_4": nodes[3] if len(nodes) > 3 else None,
                         "node_5": nodes[4] if len(nodes) > 4 else None,
-                        "path_type": timing.path.path_type.value,
+                        "path_type": path_type.value,
                         "sort_level": timing.path.sort_level.value,
                         "dest_sort_level": timing.path.dest_sort_level.value,
                         "total_path_miles": round(timing.path.total_path_miles, 1),
@@ -198,12 +226,11 @@ class ReportBuilder:
                         "sla_met": timing.sla_met,
                         "sla_slack_hours": round(timing.sla_slack_hours, 2),
                         "uses_only_active_arcs": timing.uses_only_active_arcs,
-                        "pkgs_day": pkgs_day,
-                        "pkgs_mm": pkgs_mm,
-                        "pkgs_zs": pkgs_zs,
-                        "pkgs_di": pkgs_di,
-                        "zone_mm_zs": zone_mm_zs,
-                        "zone_di": zone_di
+                        "pkgs_day": path_pkgs_day,
+                        "pkgs_mm": path_pkgs_mm,
+                        "pkgs_zs": path_pkgs_zs,
+                        "pkgs_di": path_pkgs_di,
+                        "zone": path_zone
                     })
 
         df = pd.DataFrame(rows)
@@ -275,26 +302,58 @@ class ReportBuilder:
             scenario_demands = [d for d in self.od_demands if d.scenario_id == scenario_id]
 
             for demand in scenario_demands:
-                if demand.flow_type == FlowType.DIRECT_INJECTION:
-                    continue
-
                 key = (demand.origin, demand.dest)
                 timings = self.od_timings.get(key, [])
 
                 if not timings:
                     continue
 
-                best = min(timings, key=_path_ranking_key)
+                # Find best path matching this flow type
+                # DI/od_mm paths are distinct from networked paths
+                if demand.flow_type == FlowType.DIRECT_INJECTION:
+                    matching = [t for t in timings if t.path.path_type == PathType.DIRECT_INJECTION]
+                elif demand.zone > 0 and demand.origin == demand.dest:
+                    # O=D with zone > 0 is od_mm
+                    matching = [t for t in timings if t.path.path_type == PathType.OD_MM]
+                else:
+                    # Networked paths (exclude DI and od_mm)
+                    matching = [t for t in timings if t.path.path_type not in (PathType.DIRECT_INJECTION, PathType.OD_MM)]
+
+                if not matching:
+                    continue
+
+                best = min(matching, key=_path_ranking_key)
 
                 if not best.sla_met:
+                    # Calculate TIT breakdown
+                    tit_sort_mins = 0.0
+                    tit_crossdock_mins = 0.0
+                    tit_transit_mins = 0.0
+
+                    for step in best.steps:
+                        if step.step_type in (StepType.INDUCTION_SORT, StepType.FULL_SORT,
+                                              StepType.SORT_GROUP_SORT, StepType.ROUTE_SORT):
+                            tit_sort_mins += step.duration_minutes
+                        elif step.step_type == StepType.CROSSDOCK:
+                            tit_crossdock_mins += step.duration_minutes
+                        elif step.step_type == StepType.TRANSIT:
+                            tit_transit_mins += step.duration_minutes
+
                     rows.append({
                         "scenario_id": scenario_id,
                         "origin": demand.origin,
                         "dest": demand.dest,
+                        "flow_type": demand.flow_type.value,
+                        "path_type": best.path.path_type.value,
                         "zone": demand.zone,
                         "pkgs_day": round(demand.pkgs_day, 0),
                         "sla_days": best.sla_days,
+                        "sla_target_hours": round(best.sla_target_hours, 2),
                         "best_tit_hours": round(best.tit_hours, 2),
+                        "tit_sort_hours": round(tit_sort_mins / 60, 2),
+                        "tit_crossdock_hours": round(tit_crossdock_mins / 60, 2),
+                        "tit_transit_hours": round(tit_transit_mins / 60, 2),
+                        "tit_dwell_hours": round(best.total_dwell_hours, 2),
                         "miss_hours": round(-best.sla_slack_hours, 2)
                     })
 
