@@ -89,13 +89,20 @@ class PathEnumerator:
         return valid_candidates
 
     def _create_od_equal_path(self, origin: str, dest: str) -> list[PathCandidate]:
-        """Create the single valid path for O=D scenarios."""
-        # O=D is always sort_group level, 2-touch path (origin + dest same facility)
+        """
+        Create path for O=D scenarios where origin equals destination.
+
+        Used for zone skip and middle mile flows where O=D (zone 1+).
+        Direct injection (zone 0) is handled separately in reporting.
+        """
+        # O=D middle mile - uses od_mm path type
+        # sort_level and dest_sort_level are n/a conceptually but we use SORT_GROUP
+        # since the timing logic uses path_type to determine processing
         return [PathCandidate(
             origin=origin,
             dest=dest,
-            path_nodes=[origin, dest],
-            path_type=PathType.TWO_TOUCH,
+            path_nodes=[origin],  # Single node for O=D
+            path_type=PathType.OD_MM,
             sort_level=SortLevel.SORT_GROUP,
             dest_sort_level=SortLevel.SORT_GROUP,
             total_path_miles=0.0,
@@ -108,10 +115,10 @@ class PathEnumerator:
         Enumerate raw paths based on max_path_touches.
 
         Touch count = number of facilities in path:
-        - 2-touch: O → D (2 nodes)
-        - 3-touch: O → H → D (3 nodes)
-        - 4-touch: O → H1 → H2 → D (4 nodes)
-        - 5-touch: O → H1 → H2 → H3 → D (5 nodes)
+        - 2-touch: O -> D (2 nodes)
+        - 3-touch: O -> H -> D (3 nodes)
+        - 4-touch: O -> H1 -> H2 -> D (4 nodes)
+        - 5-touch: O -> H1 -> H2 -> H3 -> D (5 nodes)
         """
         paths = []
 
@@ -119,7 +126,7 @@ class PathEnumerator:
         if self.max_path_touches >= 2:
             paths.append([origin, dest])
 
-        # 3-touch: O → H → D
+        # 3-touch: O -> H -> D
         if self.max_path_touches >= 3:
             for hub_name in self.sorting_facilities:
                 if hub_name != origin and hub_name != dest:
@@ -127,7 +134,7 @@ class PathEnumerator:
                     if self._is_valid_path_structure(path):
                         paths.append(path)
 
-        # 4-touch: O → H1 → H2 → D
+        # 4-touch: O -> H1 -> H2 -> D
         if self.max_path_touches >= 4:
             for hub1 in self.sorting_facilities:
                 if hub1 == origin or hub1 == dest:
@@ -139,7 +146,7 @@ class PathEnumerator:
                     if self._is_valid_path_structure(path):
                         paths.append(path)
 
-        # 5-touch: O → H1 → H2 → H3 → D
+        # 5-touch: O -> H1 -> H2 -> H3 -> D
         if self.max_path_touches >= 5:
             for hub1 in self.sorting_facilities:
                 if hub1 == origin or hub1 == dest:
@@ -247,7 +254,7 @@ class PathEnumerator:
                 path_nodes=path_nodes,
                 path_type=path_type,
                 sort_level=SortLevel.REGION,
-                dest_sort_level=SortLevel.MARKET,  # Hub sorts to market, dest does LM sort
+                dest_sort_level=SortLevel.MARKET,
                 total_path_miles=total_miles,
                 direct_miles=direct_miles,
                 atw_factor=atw_factor
@@ -258,7 +265,7 @@ class PathEnumerator:
                 path_nodes=path_nodes,
                 path_type=path_type,
                 sort_level=SortLevel.REGION,
-                dest_sort_level=SortLevel.SORT_GROUP,  # Hub sorts to sort_group, no LM sort
+                dest_sort_level=SortLevel.SORT_GROUP,
                 total_path_miles=total_miles,
                 direct_miles=direct_miles,
                 atw_factor=atw_factor
@@ -276,20 +283,51 @@ def enumerate_all_paths(
         run_settings=data["run_settings"]
     )
 
-    # Get unique OD pairs (excluding direct injection zone 0)
-    od_pairs = set()
-    for od in od_demands:
-        if od.zone > 0:
-            od_pairs.add((od.origin, od.dest))
+    # Separate DI (zone 0) from networked flows (zone 1+)
+    di_od_pairs = set()
+    networked_od_pairs = set()
 
-    logger.info(f"Enumerating paths for {len(od_pairs)} unique OD pairs")
+    for od in od_demands:
+        if od.zone == 0:
+            di_od_pairs.add((od.origin, od.dest))
+        else:
+            networked_od_pairs.add((od.origin, od.dest))
+
+    logger.info(f"Enumerating paths for {len(networked_od_pairs)} networked OD pairs, {len(di_od_pairs)} DI OD pairs")
 
     od_paths = {}
-    for origin, dest in od_pairs:
+
+    # Enumerate networked paths (zone 1+)
+    for origin, dest in networked_od_pairs:
         candidates = enumerator.enumerate_paths_for_od(origin, dest)
         od_paths[(origin, dest)] = candidates
 
+    # Create DI paths (zone 0, always O=D)
+    for origin, dest in di_od_pairs:
+        if origin != dest:
+            logger.warning(f"DI demand has origin != dest: {origin} -> {dest}, skipping")
+            continue
+
+        # DI path - single node
+        di_path = PathCandidate(
+            origin=origin,
+            dest=dest,
+            path_nodes=[origin],
+            path_type=PathType.DIRECT_INJECTION,
+            sort_level=SortLevel.SORT_GROUP,  # n/a conceptually
+            dest_sort_level=SortLevel.SORT_GROUP,  # n/a conceptually
+            total_path_miles=0.0,
+            direct_miles=0.0,
+            atw_factor=1.0
+        )
+
+        # Add to existing paths or create new entry
+        if (origin, dest) in od_paths:
+            od_paths[(origin, dest)].append(di_path)
+        else:
+            od_paths[(origin, dest)] = [di_path]
+
     total_paths = sum(len(p) for p in od_paths.values())
-    logger.info(f"Generated {total_paths} total path candidates across {len(od_pairs)} OD pairs")
+    logger.info(f"Generated {total_paths} total path candidates across {len(od_paths)} OD pairs")
 
     return od_paths

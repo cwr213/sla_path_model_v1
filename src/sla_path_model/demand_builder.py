@@ -114,7 +114,7 @@ class DemandBuilder:
 
         total = sum(self.injection_shares.values())
         if abs(total - 1.0) > 0.01:
-            logger.warning(f"Injection shares sum to {total:.3f}, expected 1.0")
+            raise ValueError(f"Injection shares must sum to 1.0, got {total:.4f}")
 
         logger.info(f"Built injection shares for {len(self.injection_shares)} facilities")
 
@@ -171,44 +171,41 @@ class DemandBuilder:
         if band:
             return band.zone
 
-        return self.mileage_bands[-1].zone if self.mileage_bands else -1
+        return self.mileage_bands[-1].zone if self.mileage_bands else 1
 
     def build_demands(self) -> list[ODDemand]:
         """Build OD demand list for all scenarios."""
         demands = []
-        skipped_scenarios = []
 
         for _, scenario in self.scenarios_df.iterrows():
             scenario_id = str(scenario["scenario_id"])
             year = int(scenario["year"])
             day_type = str(scenario["day_type"]).lower().strip()
 
-            # Check if year has facility column
-            if year not in self.facility_year_cols:
-                logger.warning(
-                    f"Skipping scenario {scenario_id}: no facility_{year} column in zips sheet. "
-                    f"Available years: {self.available_years}"
-                )
-                skipped_scenarios.append(scenario_id)
-                continue
-
             logger.info(f"Building demand for scenario {scenario_id} (year={year}, {day_type})")
+
+            # Check year has facility column
+            if year not in self.facility_year_cols:
+                raise ValueError(
+                    f"Scenario '{scenario_id}' uses year {year} but no facility_{year} "
+                    f"column found in zips sheet. Available years: {self.available_years}"
+                )
 
             params = self._get_demand_params(year, day_type)
             daily_pkgs = params['daily_pkgs']
 
             if daily_pkgs <= 0:
-                logger.warning(f"Zero demand for scenario {scenario_id}")
-                continue
+                raise ValueError(f"Zero or negative daily demand for scenario {scenario_id}")
 
             # Build destination shares for this year
             dest_shares = self._build_destination_shares_for_year(year)
-
             if not dest_shares:
-                logger.warning(f"No active zips for year {year} in scenario {scenario_id}")
-                continue
+                raise ValueError(
+                    f"No destination facilities found for year {year}. "
+                    f"Check that facility_{year} column has valid facility names."
+                )
 
-            scenario_demands = self._build_od_matrix(scenario_id, params, day_type, dest_shares)
+            scenario_demands = self._build_od_matrix(scenario_id, params, day_type, dest_shares, year)
             demands.extend(scenario_demands)
 
             # Log summary by flow type
@@ -227,9 +224,6 @@ class DemandBuilder:
             )
             logger.info(f"    Active destinations: {len(dest_shares)} facilities")
 
-        if skipped_scenarios:
-            logger.warning(f"Skipped {len(skipped_scenarios)} scenarios due to missing facility columns")
-
         logger.info(f"Built {len(demands)} total OD demand records")
         return demands
 
@@ -238,13 +232,14 @@ class DemandBuilder:
             scenario_id: str,
             params: dict,
             day_type: str,
-            dest_shares: dict[str, float]
+            dest_shares: dict[str, float],
+            year: int
     ) -> list[ODDemand]:
         """Build OD matrix for a single scenario."""
         demands = []
         daily_pkgs = params['daily_pkgs']
 
-        # 1. DIRECT INJECTION: O=D at facility assigned for year (zone 0)
+        # 1. DIRECT INJECTION: O=D at facility assigned for this year (zone 0)
         di_daily = daily_pkgs * params['di_share']
         if di_daily > 0:
             for dest, dest_share in dest_shares.items():
@@ -298,15 +293,14 @@ class DemandBuilder:
                     day_type=day_type
                 ))
 
-        # 3. MIDDLE MILE: Origin = per injection_distribution, Dest = per population for year
+        # 3. MIDDLE MILE: Origin = per injection_distribution, Dest = per population
         mm_daily = daily_pkgs * params['mm_share']
         if mm_daily > 0:
             for origin, inj_share in self.injection_shares.items():
                 if inj_share < 0.0001:
                     continue
                 if origin not in self.facilities:
-                    logger.warning(f"Unknown injection facility: {origin}")
-                    continue
+                    raise ValueError(f"Unknown injection facility: {origin}")
 
                 origin_mm = mm_daily * inj_share
 

@@ -166,7 +166,7 @@ def main():
             for _, row in summary.iterrows():
                 logger.info(f"  Scenario {row['scenario_id']}:")
                 logger.info(f"    Total packages: {row['total_packages']:,.0f}")
-                logger.info(f"    Volume at SLA: {row['pct_volume_at_sla']:.1f}%")
+                logger.info(f"    Volume at SLA: {row['pct_volume_at_sla']*100:.1f}%")
                 logger.info(f"    Avg TIT: {row['avg_tit_hours']:.1f} hours")
 
         return 0

@@ -31,6 +31,7 @@ class InputValidator:
         self.validate_timing_params()
         self.validate_scenarios()
         self.validate_service_commitments()
+        self.validate_zips_facility_references()
 
         return self.errors, self.warnings
 
@@ -67,15 +68,24 @@ class InputValidator:
                     self.errors.append(f"Injection facility {name} must have outbound_cpt_count >= 1")
 
     def validate_facility_references(self):
-        """Validate that parent_hub_name and regional_sort_hub references exist."""
+        """Validate that parent_hub_name and regional_sort_hub references exist and are valid types."""
         facilities: dict[str, Facility] = self.data["facilities"]
 
         for name, fac in facilities.items():
             if fac.parent_hub_name and fac.parent_hub_name not in facilities:
                 self.errors.append(f"Facility {name} references unknown parent_hub_name: {fac.parent_hub_name}")
 
-            if fac.regional_sort_hub and fac.regional_sort_hub not in facilities:
-                self.errors.append(f"Facility {name} references unknown regional_sort_hub: {fac.regional_sort_hub}")
+            if fac.regional_sort_hub:
+                if fac.regional_sort_hub not in facilities:
+                    self.errors.append(f"Facility {name} references unknown regional_sort_hub: {fac.regional_sort_hub}")
+                else:
+                    # Regional sort hub must be hub or hybrid (not launch)
+                    regional_hub_fac = facilities[fac.regional_sort_hub]
+                    if regional_hub_fac.facility_type == FacilityType.LAUNCH:
+                        self.errors.append(
+                            f"Facility {name} has regional_sort_hub={fac.regional_sort_hub} which is a launch facility. "
+                            f"Regional sort hubs must be hub or hybrid."
+                        )
 
     def validate_injection_nodes(self):
         """Validate injection distribution references valid facilities."""
@@ -157,26 +167,52 @@ class InputValidator:
                 f"middle_mile_crossdock_minutes must be non-negative: {timing.middle_mile_crossdock_minutes}")
         if timing.middle_mile_sort_minutes < 0:
             self.errors.append(f"middle_mile_sort_minutes must be non-negative: {timing.middle_mile_sort_minutes}")
-        if timing.last_mile_sort_minutes < 0:
-            self.errors.append(f"last_mile_sort_minutes must be non-negative: {timing.last_mile_sort_minutes}")
+        if timing.sort_group_sort_minutes < 0:
+            self.errors.append(f"sort_group_sort_minutes must be non-negative: {timing.sort_group_sort_minutes}")
+        if timing.route_sort_minutes < 0:
+            self.errors.append(f"route_sort_minutes must be non-negative: {timing.route_sort_minutes}")
 
     def validate_scenarios(self):
         """Validate scenarios reference valid years and day types."""
         scenarios = self.data["scenarios"]
         demand = self.data["demand"]
+        zips_df = self.data["zips"]
 
         valid_years = set(demand["year"].unique())
         valid_day_types = {"offpeak", "peak"}
 
+        # Get available facility_YYYY years from zips
+        facility_years = set()
+        for col in zips_df.columns:
+            if col.startswith('facility_'):
+                try:
+                    year = int(col.replace('facility_', ''))
+                    facility_years.add(year)
+                except ValueError:
+                    continue
+
         for _, row in scenarios.iterrows():
+            scenario_id = row.get("scenario_id", "unknown")
             year = row["year"]
             day_type = str(row["day_type"]).lower().strip()
 
             if year not in valid_years:
-                self.errors.append(f"Scenario references unknown year: {year}. Valid years: {valid_years}")
+                self.errors.append(
+                    f"Scenario '{scenario_id}' references year {year} not in demand sheet. "
+                    f"Valid years: {sorted(valid_years)}"
+                )
 
             if day_type not in valid_day_types:
-                self.errors.append(f"Scenario has invalid day_type: {day_type}. Must be one of {valid_day_types}")
+                self.errors.append(
+                    f"Scenario '{scenario_id}' has invalid day_type: {day_type}. "
+                    f"Must be one of {valid_day_types}"
+                )
+
+            if year not in facility_years:
+                self.errors.append(
+                    f"Scenario '{scenario_id}' uses year {year} but no facility_{year} column in zips. "
+                    f"Available years: {sorted(facility_years)}"
+                )
 
     def validate_service_commitments(self):
         """Validate service commitments have valid structure."""
@@ -207,6 +243,26 @@ class InputValidator:
                 self.warnings.append(f"Service commitment has negative sla_buffer_days: {sc.sla_buffer_days}")
             if sc.priority_weight <= 0:
                 self.errors.append(f"Service commitment priority_weight must be positive: {sc.priority_weight}")
+
+    def validate_zips_facility_references(self):
+        """Validate that facility names in zips sheet exist in facilities."""
+        facilities: dict[str, Facility] = self.data["facilities"]
+        zips_df = self.data["zips"]
+
+        # Get all facility_YYYY columns
+        facility_cols = [c for c in zips_df.columns if c.startswith('facility_')]
+
+        unknown_facilities = set()
+        for col in facility_cols:
+            # Get unique non-null facility names in this column
+            fac_names = zips_df[col].dropna().unique()
+            for fac_name in fac_names:
+                fac_name_str = str(fac_name).strip()
+                if fac_name_str and fac_name_str not in facilities:
+                    unknown_facilities.add((col, fac_name_str))
+
+        for col, fac_name in unknown_facilities:
+            self.errors.append(f"Zips sheet {col} references unknown facility: {fac_name}")
 
 
 def validate_inputs(data: dict) -> None:

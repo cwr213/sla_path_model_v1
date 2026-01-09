@@ -18,7 +18,7 @@ from typing import Optional
 
 from .config import (
     Facility, FacilityType, PathCandidate, PathStep, PathTimingResult,
-    SortLevel, StepType, TimingParams, MileageBand, CPT,
+    SortLevel, StepType, TimingParams, MileageBand, CPT, PathType,
     MINUTES_PER_HOUR
 )
 from .cpt_generator import CPTGenerator, get_cpts_for_path
@@ -50,6 +50,13 @@ class TimingEngine:
     def calculate_path_timing(self, path: PathCandidate) -> PathTimingResult:
         """
         Calculate TIT using forward-chaining from fixed injection time.
+
+        Sort logic:
+        - DI at Launch: sort_group_sort + route_sort (no induction)
+        - DI at Hub/Hybrid: induction_sort + route_sort (induction includes sort_group)
+        - od_mm at Hub/Hybrid: induction_sort + route_sort (same as DI at Hub/Hybrid)
+        - Networked, dest_sort_level=sort_group: induction + transit + route_sort
+        - Networked, dest_sort_level=market: induction + transit + sort_group_sort + route_sort
         """
         dest_fac = self.facilities[path.dest]
         origin_fac = self.facilities[path.origin]
@@ -68,44 +75,57 @@ class TimingEngine:
         all_arcs_active = True  # Track if all arcs use active CPTs
 
         is_od_equal = (path.origin == path.dest)
+        is_di = (path.path_type == PathType.DIRECT_INJECTION)
+        is_od_mm = (path.path_type == PathType.OD_MM)
+        origin_is_hub_or_hybrid = origin_fac.facility_type in (FacilityType.HUB, FacilityType.HYBRID)
 
-        # Step 1: Induction sort at origin (MM sort)
-        mm_window = origin_fac.get_mm_sort_window()
-
-        if mm_window:
-            induction_start_utc, window_dwell = align_to_window_start(
-                current_time_utc,
-                mm_window,
-                self.timing_params.induction_sort_minutes
-            )
+        # Step 1: Induction sort at origin
+        # Applied for: hub/hybrid (DI, od_mm, or networked paths)
+        # NOT applied for: DI at launch or od_mm at launch (no MM sort capability)
+        if is_di or is_od_mm:
+            # O=D paths - only get induction at hub/hybrid
+            needs_induction = origin_is_hub_or_hybrid
         else:
-            induction_start_utc = current_time_utc
-            window_dwell = 0
+            # Networked paths - origin is always hub/hybrid by path validation
+            needs_induction = True
 
-        induction_end_utc = induction_start_utc + timedelta(
-            minutes=self.timing_params.induction_sort_minutes
-        )
+        if needs_induction:
+            mm_window = origin_fac.get_mm_sort_window()
 
-        induction_step = PathStep(
-            step_sequence=1,
-            step_type=StepType.INDUCTION_SORT,
-            from_facility=path.origin,
-            to_facility=path.origin,
-            from_lat=origin_fac.lat,
-            from_lon=origin_fac.lon,
-            to_lat=origin_fac.lat,
-            to_lon=origin_fac.lon,
-            distance_miles=0,
-            start_utc=induction_start_utc,
-            end_utc=induction_end_utc,
-            duration_minutes=self.timing_params.induction_sort_minutes,
-            sort_window_dwell_minutes=window_dwell,
-            cpt_dwell_minutes=0,
-            total_dwell_minutes=window_dwell
-        )
-        steps.append(induction_step)
-        total_sort_window_dwell += window_dwell
-        current_time_utc = induction_end_utc
+            if mm_window:
+                induction_start_utc, window_dwell = align_to_window_start(
+                    current_time_utc,
+                    mm_window,
+                    self.timing_params.induction_sort_minutes
+                )
+            else:
+                induction_start_utc = current_time_utc
+                window_dwell = 0
+
+            induction_end_utc = induction_start_utc + timedelta(
+                minutes=self.timing_params.induction_sort_minutes
+            )
+
+            induction_step = PathStep(
+                step_sequence=1,
+                step_type=StepType.INDUCTION_SORT,
+                from_facility=path.origin,
+                to_facility=path.origin,
+                from_lat=origin_fac.lat,
+                from_lon=origin_fac.lon,
+                to_lat=origin_fac.lat,
+                to_lon=origin_fac.lon,
+                distance_miles=0,
+                start_utc=induction_start_utc,
+                end_utc=induction_end_utc,
+                duration_minutes=self.timing_params.induction_sort_minutes,
+                sort_window_dwell_minutes=window_dwell,
+                cpt_dwell_minutes=0,
+                total_dwell_minutes=window_dwell
+            )
+            steps.append(induction_step)
+            total_sort_window_dwell += window_dwell
+            current_time_utc = induction_end_utc
 
         # Step 2: Transit legs (skip for O=D)
         if not is_od_equal:
@@ -172,29 +192,52 @@ class TimingEngine:
                         total_sort_window_dwell += processing_step.sort_window_dwell_minutes
                         current_time_utc = processing_step.end_utc
 
-        # Step 3: Last mile sort at destination (if dest_sort_level = MARKET)
-        needs_lm_sort = (path.dest_sort_level == SortLevel.MARKET)
+        # Step 3: Destination sorts (sort_group_sort and route_sort)
+        #
+        # sort_group_sort needed when:
+        # - DI at launch (no induction, so need sort_group_sort)
+        # - Networked path arriving at market level (dest_sort_level = MARKET)
+        #
+        # sort_group_sort NOT needed when:
+        # - DI/od_mm at hub/hybrid (induction already includes sort_group)
+        # - Networked path arriving at sort_group level
+        #
+        # route_sort ALWAYS needed
 
-        if needs_lm_sort and dest_fac.facility_type in (FacilityType.LAUNCH, FacilityType.HYBRID):
-            lm_sort_window = dest_fac.get_lm_sort_window()
+        # Determine if we need sort_group_sort
+        if is_di or is_od_mm:
+            # O=D scenarios
+            if origin_is_hub_or_hybrid:
+                # Induction already sorted to sort_group, skip sort_group_sort
+                needs_sort_group_sort = False
+            else:
+                # Launch facility - need sort_group_sort
+                needs_sort_group_sort = True
+        else:
+            # Networked paths - depends on dest_sort_level
+            needs_sort_group_sort = (path.dest_sort_level == SortLevel.MARKET)
 
-            if lm_sort_window:
-                lm_start_utc, window_dwell = align_to_window_start(
+        # Apply sort_group_sort if needed (uses MM window - it's a MM-type operation)
+        if needs_sort_group_sort:
+            mm_sort_window = dest_fac.get_mm_sort_window()
+
+            if mm_sort_window:
+                sg_start_utc, window_dwell = align_to_window_start(
                     current_time_utc,
-                    lm_sort_window,
-                    self.timing_params.last_mile_sort_minutes
+                    mm_sort_window,
+                    self.timing_params.sort_group_sort_minutes
                 )
             else:
-                lm_start_utc = current_time_utc
+                sg_start_utc = current_time_utc
                 window_dwell = 0
 
-            lm_end_utc = lm_start_utc + timedelta(
-                minutes=self.timing_params.last_mile_sort_minutes
+            sg_end_utc = sg_start_utc + timedelta(
+                minutes=self.timing_params.sort_group_sort_minutes
             )
 
-            lm_step = PathStep(
+            sg_step = PathStep(
                 step_sequence=len(steps) + 1,
-                step_type=StepType.LAST_MILE_SORT,
+                step_type=StepType.SORT_GROUP_SORT,
                 from_facility=path.dest,
                 to_facility=path.dest,
                 from_lat=dest_fac.lat,
@@ -202,16 +245,54 @@ class TimingEngine:
                 to_lat=dest_fac.lat,
                 to_lon=dest_fac.lon,
                 distance_miles=0,
-                start_utc=lm_start_utc,
-                end_utc=lm_end_utc,
-                duration_minutes=self.timing_params.last_mile_sort_minutes,
+                start_utc=sg_start_utc,
+                end_utc=sg_end_utc,
+                duration_minutes=self.timing_params.sort_group_sort_minutes,
                 sort_window_dwell_minutes=window_dwell,
                 cpt_dwell_minutes=0,
                 total_dwell_minutes=window_dwell
             )
-            steps.append(lm_step)
+            steps.append(sg_step)
             total_sort_window_dwell += window_dwell
-            current_time_utc = lm_end_utc
+            current_time_utc = sg_end_utc
+
+        # Always apply route_sort (uses LM window)
+        lm_sort_window = dest_fac.get_lm_sort_window()
+
+        if lm_sort_window:
+            route_start_utc, window_dwell = align_to_window_start(
+                current_time_utc,
+                lm_sort_window,
+                self.timing_params.route_sort_minutes
+            )
+        else:
+            route_start_utc = current_time_utc
+            window_dwell = 0
+
+        route_end_utc = route_start_utc + timedelta(
+            minutes=self.timing_params.route_sort_minutes
+        )
+
+        route_step = PathStep(
+            step_sequence=len(steps) + 1,
+            step_type=StepType.ROUTE_SORT,
+            from_facility=path.dest,
+            to_facility=path.dest,
+            from_lat=dest_fac.lat,
+            from_lon=dest_fac.lon,
+            to_lat=dest_fac.lat,
+            to_lon=dest_fac.lon,
+            distance_miles=0,
+            start_utc=route_start_utc,
+            end_utc=route_end_utc,
+            duration_minutes=self.timing_params.route_sort_minutes,
+            sort_window_dwell_minutes=window_dwell,
+            cpt_dwell_minutes=0,
+            total_dwell_minutes=window_dwell
+        )
+        steps.append(route_step)
+        total_sort_window_dwell += window_dwell
+        current_time_utc = route_end_utc
 
         # Calculate results
         arrival_time_utc = current_time_utc

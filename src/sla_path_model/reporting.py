@@ -3,7 +3,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from .config import PathTimingResult, ODDemand, FlowType, SortLevel, StepType
+from .config import PathTimingResult, ODDemand, FlowType, SortLevel, StepType, PathType
 from .utils import setup_logging
 
 logger = setup_logging()
@@ -151,40 +151,8 @@ class ReportBuilder:
                 timings = self.od_timings.get((origin, dest), [])
 
                 if not timings:
-                    # No paths found - only output if there's DI demand (O=D with no network path)
-                    if pkgs_di > 0:
-                        rows.append({
-                            "scenario_id": scenario_id,
-                            "origin": origin,
-                            "dest": dest,
-                            "node_1": dest,
-                            "node_2": None,
-                            "node_3": None,
-                            "node_4": None,
-                            "node_5": None,
-                            "path_type": "direct_injection",
-                            "sort_level": "n/a",
-                            "dest_sort_level": "n/a",
-                            "total_path_miles": 0,
-                            "direct_miles": 0,
-                            "atw_factor": 1.0,
-                            "tit_hours": 0,
-                            "tit_sort_hours": 0,
-                            "tit_crossdock_hours": 0,
-                            "tit_transit_hours": 0,
-                            "tit_dwell_hours": 0,
-                            "sla_days": 0,
-                            "sla_target_hours": 0,
-                            "sla_met": True,
-                            "sla_slack_hours": 0,
-                            "uses_only_active_arcs": True,
-                            "pkgs_day": pkgs_di,
-                            "pkgs_mm": 0,
-                            "pkgs_zs": 0,
-                            "pkgs_di": pkgs_di,
-                            "zone_mm_zs": None,
-                            "zone_di": zone_di
-                        })
+                    # No paths found - skip this OD (shouldn't happen if demand exists)
+                    logger.warning(f"No paths found for OD {origin}->{dest} with demand")
                     continue
 
                 # Output each unique path once with consolidated demand
@@ -197,7 +165,8 @@ class ReportBuilder:
                     tit_transit_mins = 0.0
 
                     for step in timing.steps:
-                        if step.step_type in (StepType.INDUCTION_SORT, StepType.FULL_SORT, StepType.LAST_MILE_SORT):
+                        if step.step_type in (StepType.INDUCTION_SORT, StepType.FULL_SORT,
+                                              StepType.SORT_GROUP_SORT, StepType.ROUTE_SORT):
                             tit_sort_mins += step.duration_minutes
                         elif step.step_type == StepType.CROSSDOCK:
                             tit_crossdock_mins += step.duration_minutes

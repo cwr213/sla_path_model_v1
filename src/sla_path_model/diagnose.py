@@ -1,391 +1,374 @@
+#!/usr/bin/env python3
 """
-Diagnostic tool for analyzing path timing calculations.
+Diagnostic tool for analyzing specific OD pair paths with detailed timing breakdown.
+
+Configure the parameters below and run in PyCharm or command line.
 """
+import sys
+from pathlib import Path
 
-# =============================================================================
-# CONFIGURATION - EDIT THESE VALUES
-# =============================================================================
-INPUT_FILE = r"C:\Users\cwr21\OneDrive\Documents\python_data\python_projects\sla_path_model_v1\data\input_sla_model_v1.xlsx"
-ORIGIN = "BNA01"
-DEST = "BOS01"
-SCENARIO_ID = None  # None = use first scenario, or specify e.g. "2026_peak_paths_v1"
-# =============================================================================
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from datetime import datetime
+# ============== CONFIGURATION ==============
+ORIGIN = "ATL02"
+DEST = "ATL02"
+PATH_TYPE = None              # None = all, or "direct_injection", "od_mm", "2_touch", "3_touch", "4_touch"
+SORT_LEVEL = None             # None = all, or "region", "market", "sort_group"
+DEST_SORT_LEVEL = None        # None = all, or "region", "market", "sort_group"
+SHOW_DETAIL_FOR = None        # None = summary only, or path number (1, 2, 3...) for detailed breakdown
+SHOW_TOP_N_DETAILS = 1        # Show detailed breakdown for top N paths (0 = summary only, ignored if SHOW_DETAIL_FOR is set)
+SHOW_ALL_DETAILS = False      # True = show detailed breakdown for ALL paths (overrides above)
+INPUT_FILE = "data/input_sla_model_v1.xlsx"
+# ===========================================
+
+from datetime import datetime, timedelta
 from typing import Optional
 
+from sla_path_model.config import (
+    PathCandidate, PathTimingResult, PathType, SortLevel, StepType,
+    FacilityType, FlowType, Facility
+)
 from sla_path_model.io_loader import InputLoader
-from sla_path_model.validators import InputValidator
-from sla_path_model.demand_builder import DemandBuilder
 from sla_path_model.path_enumeration import PathEnumerator
-from sla_path_model.cpt_generator import CPTGenerator
 from sla_path_model.timing_engine import TimingEngine
+from sla_path_model.cpt_generator import CPTGenerator
 from sla_path_model.feasibility import FeasibilityChecker
-from sla_path_model.geo import haversine_miles
+from sla_path_model.geo import haversine_miles, get_zone_for_distance
 from sla_path_model.time_utils import utc_to_local
-from sla_path_model.config import FlowType, FacilityType, ODDemand
-
-# Suppress verbose logging from other modules
-import logging
-
-logging.getLogger("sla_path_model").setLevel(logging.WARNING)
 
 
-def print_section(title: str):
-    """Print a section header."""
-    print(f"\n{'=' * 70}")
-    print(f" {title}")
-    print('=' * 70)
+def get_tz_abbrev(facility: Facility, dt_utc: datetime) -> str:
+    """Get timezone abbreviation (EST/EDT, PST/PDT, etc.) for a given UTC datetime."""
+    local_dt = dt_utc.replace(tzinfo=None)
+    local_dt = utc_to_local(dt_utc, facility.timezone)
+    # Get the timezone abbreviation
+    return local_dt.strftime("%Z") if hasattr(local_dt, 'strftime') else str(facility.timezone)
 
 
-def print_facility_info(fac, label: str):
-    """Print facility details."""
-    print(f"\n{label}:")
-    print(f"  Name: {fac.name}")
-    print(f"  Type: {fac.facility_type.value}")
-    print(f"  Timezone: {fac.timezone}")
-    print(f"  Location: ({fac.lat:.4f}, {fac.lon:.4f})")
-
-    # MM sort window (used for outbound processing at origin/intermediate)
-    mm_window = fac.get_mm_sort_window()
-    if mm_window:
-        print(f"  MM Sort Window: {mm_window.start_local} - {mm_window.end_local}")
-
-    # LM sort window (used at destination)
-    lm_window = fac.get_lm_sort_window()
-    if lm_window:
-        print(f"  LM Sort Window: {lm_window.start_local} - {lm_window.end_local}")
-
-    if fac.lm_sort_end_local:
-        print(f"  LM Sort End (delivery deadline): {fac.lm_sort_end_local}")
+def format_local_time(dt_utc: datetime, facility: Facility) -> str:
+    """Format UTC datetime as local time with day and timezone."""
+    local_dt = utc_to_local(dt_utc, facility.timezone)
+    tz_abbrev = local_dt.strftime("%Z")
+    return f"{local_dt.strftime('%a %H:%M')} {tz_abbrev}"
 
 
-def print_timing_params(timing):
-    """Print timing parameters."""
-    print(f"\nTiming Parameters:")
-    print(f"  Induction Sort: {timing.induction_sort_minutes} min")
-    print(f"  Middle Mile Crossdock: {timing.middle_mile_crossdock_minutes} min")
-    print(f"  Middle Mile Sort: {timing.middle_mile_sort_minutes} min")
-    print(f"  Last Mile Sort: {timing.last_mile_sort_minutes} min")
+def format_window(start_local, end_local) -> str:
+    """Format a time window as HH:MM-HH:MM."""
+    if start_local is None or end_local is None:
+        return "N/A"
+    return f"{start_local.strftime('%H:%M')}-{end_local.strftime('%H:%M')}"
 
 
-def print_step_detail(step, facilities: dict):
-    """Print detailed info about a single path step."""
-    from_fac = facilities.get(step.from_facility)
-    to_fac = facilities.get(step.to_facility)
+def print_summary_table(timings: list[PathTimingResult], facilities: dict[str, Facility]):
+    """Print compact summary table of all paths."""
+    print()
+    print(f"  #  Path Type         Sort Lvl    Dest Sort   Nodes                                TIT(hrs)  SLA     Slack")
+    print(f"  -  ---------         --------    ---------   -----                                --------  ---     -----")
 
-    print(f"\n  Step {step.step_sequence}: {step.step_type.value.upper()}")
-    print(f"    From: {step.from_facility} → To: {step.to_facility}")
+    for i, timing in enumerate(timings, 1):
+        path = timing.path
+        nodes_str = "→".join(path.path_nodes)
+        if len(nodes_str) > 35:
+            nodes_str = nodes_str[:32] + "..."
 
-    if step.distance_miles and step.distance_miles > 0:
-        print(f"    Distance: {step.distance_miles:.1f} mi")
+        sla_status = "MET" if timing.sla_met else "MISS"
+        slack_sign = "+" if timing.sla_slack_hours >= 0 else ""
 
-    # Show times in local timezone of the 'from' facility
-    if from_fac:
-        start_local = utc_to_local(step.start_utc, from_fac.timezone)
-        print(
-            f"    Start: {step.start_utc.strftime('%Y-%m-%d %H:%M')} UTC = {start_local.strftime('%Y-%m-%d %H:%M')} local")
-    else:
-        print(f"    Start: {step.start_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-
-    # Show end time in local timezone of the 'to' facility
-    if to_fac:
-        end_local = utc_to_local(step.end_utc, to_fac.timezone)
-        print(
-            f"    End:   {step.end_utc.strftime('%Y-%m-%d %H:%M')} UTC = {end_local.strftime('%Y-%m-%d %H:%M')} local")
-    else:
-        print(f"    End:   {step.end_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-
-    print(f"    Duration: {step.duration_minutes:.0f} min")
-
-    if step.sort_window_dwell_minutes > 0:
-        print(f"    Sort Window Dwell: {step.sort_window_dwell_minutes:.0f} min (waited for window to open)")
-    if step.cpt_dwell_minutes > 0:
-        print(f"    CPT Dwell: {step.cpt_dwell_minutes:.0f} min (waited for trailer departure)")
-    if step.total_dwell_minutes > 0:
-        print(f"    Total Dwell: {step.total_dwell_minutes:.0f} min")
+        print(f"  {i:<2} {path.path_type.value:<17} {path.sort_level.value:<11} {path.dest_sort_level.value:<11} "
+              f"{nodes_str:<36} {timing.tit_hours:>6.1f}    {sla_status:<6}  {slack_sign}{timing.sla_slack_hours:.1f}")
 
 
-def diagnose_od_pair(
-        input_file: str,
-        origin_code: str,
-        dest_code: str,
-        scenario_id: Optional[str] = None
-):
-    """
-    Diagnose timing calculations for a specific OD pair.
-    Shows all paths and detailed timing breakdown.
-    """
-    print_section(f"DIAGNOSTIC: {origin_code} → {dest_code}")
+def print_detailed_breakdown(timing: PathTimingResult, facilities: dict[str, Facility], path_num: int):
+    """Print detailed step-by-step breakdown for a single path."""
+    path = timing.path
+    origin_fac = facilities[path.origin]
+    dest_fac = facilities[path.dest]
 
-    # Load data
-    print("\nLoading data...")
-    loader = InputLoader(input_file)
-    data = loader.load_all()
+    print()
+    print(f"{'='*90}")
+    print(f"=== DETAILED BREAKDOWN: Path #{path_num} ({path.path_type.value}, {path.sort_level.value}) ===")
+    print(f"{'='*90}")
+    print()
+    print(f"Route: {' → '.join(path.path_nodes)}")
+    print(f"Origin: {path.origin} ({origin_fac.facility_type.value}) - {origin_fac.timezone}")
+    print(f"Dest:   {path.dest} ({dest_fac.facility_type.value}) - {dest_fac.timezone}")
+    print(f"Direct miles: {path.direct_miles:.1f}, Path miles: {path.total_path_miles:.1f}, ATW: {path.atw_factor:.2f}")
+    print()
 
-    # Validate
-    validator = InputValidator(data)
-    errors, warnings = validator.validate_all()
-    if errors:
-        print("Validation errors:")
-        for err in errors:
-            print(f"  - {err}")
-        return
-    if warnings:
-        print("Validation warnings:")
-        for warn in warnings:
-            print(f"  - {warn}")
+    # Header
+    print(f"Step  Type                Facility        Start (local)       End (local)         Dur(min)  Dwell(min)  Notes")
+    print(f"────  ────                ────────        ─────────────       ───────────         ────────  ──────────  ─────")
 
-    # Get facilities (already a dict keyed by name)
-    facilities = data["facilities"]
+    # Track sort/transit/dwell totals
+    total_sort_mins = 0
+    total_transit_mins = 0
+    total_crossdock_mins = 0
+    total_window_dwell = 0
+    total_cpt_dwell = 0
 
-    if origin_code not in facilities:
-        print(f"ERROR: Origin '{origin_code}' not found in facilities")
-        print(f"Available facilities: {list(facilities.keys())[:10]}...")
-        return
-    if dest_code not in facilities:
-        print(f"ERROR: Destination '{dest_code}' not found in facilities")
-        return
+    for step in timing.steps:
+        step_fac = facilities.get(step.from_facility) or facilities.get(step.to_facility)
 
-    origin_fac = facilities[origin_code]
-    dest_fac = facilities[dest_code]
+        # Determine which facility to use for timezone
+        if step.step_type == StepType.TRANSIT:
+            from_fac = facilities[step.from_facility]
+            to_fac = facilities[step.to_facility]
+            facility_str = f"{step.from_facility}→{step.to_facility}"
+            start_str = format_local_time(step.start_utc, from_fac)
+            end_str = format_local_time(step.end_utc, to_fac)
 
-    print_facility_info(origin_fac, "ORIGIN FACILITY")
-    print_facility_info(dest_fac, "DESTINATION FACILITY")
-
-    # Distance
-    direct_miles = haversine_miles(origin_fac.lat, origin_fac.lon, dest_fac.lat, dest_fac.lon)
-    print(f"\nDirect Distance: {direct_miles:.1f} miles")
-
-    # Get zone from mileage bands
-    mileage_bands = data["mileage_bands"]
-    zone = None
-    matched_band = None
-    for band in mileage_bands:
-        if band.mileage_band_min <= direct_miles < band.mileage_band_max:
-            zone = band.zone
-            matched_band = band
-            print(
-                f"Zone: {zone} (band {band.mileage_band_min}-{band.mileage_band_max} mi, {band.mph} mph, circuity={band.circuity_factor})")
-            break
-
-    if zone is None:
-        print("WARNING: No mileage band matched!")
-
-    # Timing params
-    timing_params = data["timing_params"]
-    print_timing_params(timing_params)
-
-    # Service commitment
-    print_section("SERVICE COMMITMENT LOOKUP")
-    feasibility_checker = FeasibilityChecker(data["service_commitments"])
-    commitment = feasibility_checker.get_commitment(origin_code, dest_code, zone or 0)
-    if commitment:
-        print(f"Matched Rule: origin={commitment.origin}, dest={commitment.dest}, zone={commitment.zone}")
-        print(f"SLA Days: {commitment.sla_days}")
-        print(f"Buffer Days: {commitment.sla_buffer_days}")
-        total_allowed = commitment.sla_days + commitment.sla_buffer_days
-        print(f"Total Allowed: {total_allowed} days = {total_allowed * 24} hours")
-    else:
-        print("WARNING: No service commitment found!")
-
-    # Get scenario
-    scenarios_df = data["scenarios"]
-    if scenario_id:
-        scenario_match = scenarios_df[scenarios_df["scenario_id"] == scenario_id]
-        if scenario_match.empty:
-            print(f"ERROR: Scenario '{scenario_id}' not found")
-            return
-        scenario = scenario_match.iloc[0]
-    else:
-        scenario = scenarios_df.iloc[0]
-        scenario_id = scenario["scenario_id"]
-        print(f"\nUsing first scenario: {scenario_id}")
-
-    # Get reference date from run_settings
-    run_settings = data["run_settings"]
-    reference_date = run_settings.reference_injection_date
-    if hasattr(reference_date, 'date'):
-        reference_datetime = reference_date
-    else:
-        reference_datetime = datetime.combine(reference_date, datetime.min.time())
-    print(f"Reference Date: {reference_datetime.date()}")
-
-    # Generate CPTs
-    print_section("CPT GENERATION")
-    cpt_gen = CPTGenerator(
-        facilities=facilities,
-        arc_cpts=data.get("arc_cpts", [])
-    )
-
-    # Show relevant CPTs for origin
-    origin_cpts = cpt_gen.get_cpts_for_arc(origin_code, dest_code)
-    print(f"\nCPTs for {origin_code} → {dest_code}: {len(origin_cpts)} found")
-    for cpt in sorted(origin_cpts, key=lambda x: x.cpt_local)[:8]:
-        print(f"  {cpt.cpt_local} local (seq={cpt.cpt_sequence}, days={','.join(cpt.days_of_week)})")
-    if len(origin_cpts) > 8:
-        print(f"  ... and {len(origin_cpts) - 8} more")
-
-    # Build demand to check for OD record
-    print_section("DEMAND LOOKUP")
-    demand_builder = DemandBuilder(
-        facilities=facilities,
-        zips_df=data["zips"],
-        demand_df=data["demand"],
-        injection_df=data["injection_distribution"],
-        scenarios_df=scenarios_df,
-        mileage_bands=mileage_bands
-    )
-    all_demands = demand_builder.build_demands()
-
-    # Filter to this OD pair
-    od_demands = [d for d in all_demands
-                  if d.scenario_id == scenario_id
-                  and d.origin == origin_code
-                  and d.dest == dest_code]
-
-    if not od_demands:
-        print(f"No demand records found for {origin_code} → {dest_code}")
-        print("This could mean:")
-        print("  - Origin doesn't inject to this destination")
-        print("  - Volume below threshold (0.01 pkgs)")
-
-        # Check if O=D
-        if origin_code == dest_code:
-            print(f"\nNote: This is an O=D pair.")
-            print(f"  Origin type: {origin_fac.facility_type.value}")
-            if origin_fac.facility_type == FacilityType.HYBRID:
-                print("  HYBRID facilities CAN have O=D middle mile demand")
+            # Calculate speed for notes
+            if step.distance_miles and step.duration_minutes > 0:
+                speed = step.distance_miles / (step.duration_minutes / 60)
+                notes = f"{step.distance_miles:.0f}mi @ {speed:.0f}mph"
+                if step.cpt_dwell_minutes > 0:
+                    notes += f", CPT wait"
             else:
-                print("  Only HYBRID facilities can have O=D middle mile demand")
+                notes = ""
 
-        # Create a synthetic demand record for diagnosis
-        print("\nCreating synthetic demand record for diagnosis...")
-        od_demands = [ODDemand(
-            scenario_id=scenario_id,
-            origin=origin_code,
-            dest=dest_code,
-            pkgs_day=1.0,
-            zone=zone or 2,
-            flow_type=FlowType.MIDDLE_MILE,
-            day_type="peak"
-        )]
+            total_transit_mins += step.duration_minutes
+            total_cpt_dwell += step.cpt_dwell_minutes
 
-    for od in od_demands:
-        print(f"\nDemand Record:")
-        print(f"  Flow Type: {od.flow_type.value}")
-        print(f"  Packages/Day: {od.pkgs_day:,.2f}")
-        print(f"  Zone: {od.zone}")
+        else:
+            facility_str = step.from_facility
+            start_str = format_local_time(step.start_utc, step_fac)
+            end_str = format_local_time(step.end_utc, step_fac)
 
-    # Enumerate paths
-    print_section("PATH ENUMERATION & TIMING")
-    path_enum = PathEnumerator(
-        facilities=facilities,
-        run_settings=run_settings
-    )
+            # Build notes based on step type
+            notes = ""
+            if step.step_type == StepType.INDUCTION_SORT:
+                mm_window = step_fac.get_mm_sort_window()
+                if mm_window:
+                    notes = f"MM window: {format_window(mm_window.start_local, mm_window.end_local)}"
+                total_sort_mins += step.duration_minutes
 
-    timing_engine = TimingEngine(
-        facilities=facilities,
-        mileage_bands=mileage_bands,
-        timing_params=timing_params,
-        cpt_generator=cpt_gen,
-        reference_date=reference_datetime,
-        reference_injection_time=run_settings.reference_injection_time
-    )
+            elif step.step_type == StepType.SORT_GROUP_SORT:
+                mm_window = step_fac.get_mm_sort_window()
+                if mm_window:
+                    notes = f"MM window: {format_window(mm_window.start_local, mm_window.end_local)}"
+                total_sort_mins += step.duration_minutes
 
-    # Collect all paths with their timing results
-    all_results = []  # list of (od, path, timing_result)
+            elif step.step_type == StepType.ROUTE_SORT:
+                lm_window = step_fac.get_lm_sort_window()
+                if lm_window:
+                    notes = f"LM window: {format_window(lm_window.start_local, lm_window.end_local)}"
+                total_sort_mins += step.duration_minutes
 
-    for od in od_demands:
-        paths = path_enum.enumerate_paths_for_od(od.origin, od.dest)
-        print(f"\nPaths enumerated for {od.flow_type.value} flow: {len(paths)}")
+            elif step.step_type == StepType.FULL_SORT:
+                mm_window = step_fac.get_mm_sort_window()
+                if mm_window:
+                    notes = f"MM window: {format_window(mm_window.start_local, mm_window.end_local)}"
+                total_sort_mins += step.duration_minutes
 
-        for path in paths:
-            result = timing_engine.calculate_path_timing(path)
-            num_touches = len(path.path_nodes) - 1  # hops = nodes - 1
-            all_results.append((od, path, result, num_touches))
+            elif step.step_type == StepType.CROSSDOCK:
+                mm_window = step_fac.get_mm_sort_window()
+                if mm_window:
+                    notes = f"MM window: {format_window(mm_window.start_local, mm_window.end_local)}"
+                total_crossdock_mins += step.duration_minutes
 
-    if not all_results:
-        print("\nNo paths enumerated! Check path enumeration logic.")
-        return
+            total_window_dwell += step.sort_window_dwell_minutes
 
-    # Group by path_type and find optimal path per category
-    # Ranking: TIT (ascending), then touches (ascending), then miles (ascending)
-    from collections import defaultdict
-    paths_by_type = defaultdict(list)
+        # Dwell display
+        dwell_str = ""
+        if step.sort_window_dwell_minutes > 0:
+            dwell_str = f"{step.sort_window_dwell_minutes:.0f} (win)"
+        elif step.cpt_dwell_minutes > 0:
+            dwell_str = f"{step.cpt_dwell_minutes:.0f} (cpt)"
+        else:
+            dwell_str = "0"
 
-    for od, path, result, num_touches in all_results:
-        paths_by_type[path.path_type.value].append((od, path, result, num_touches))
+        print(f"  {step.step_sequence:<3} {step.step_type.value:<19} {facility_str:<15} "
+              f"{start_str:<19} {end_str:<19} {step.duration_minutes:>6.0f}    {dwell_str:<10}  {notes}")
 
-    # Sort each group and get the best path
-    optimal_paths = []
-    print(f"\nPaths by category:")
-    for path_type, paths_list in sorted(paths_by_type.items()):
-        # Sort by: TIT, then touches, then total miles
-        paths_list.sort(key=lambda x: (x[2].tit_hours, x[3], x[1].total_path_miles))
-        best = paths_list[0]
-        optimal_paths.append(best)
+    # Summary line
+    print()
+    sort_hrs = total_sort_mins / 60
+    transit_hrs = total_transit_mins / 60
+    crossdock_hrs = total_crossdock_mins / 60
+    window_dwell_hrs = total_window_dwell / 60
+    cpt_dwell_hrs = total_cpt_dwell / 60
+    total_dwell_hrs = window_dwell_hrs + cpt_dwell_hrs
 
-        od, path, result, num_touches = best
-        print(f"  {path_type}: {len(paths_list)} paths → Best: {' → '.join(path.path_nodes)} "
-              f"(TIT={result.tit_hours:.1f}h, {num_touches} touch{'es' if num_touches != 1 else ''}, "
-              f"{path.total_path_miles:.0f}mi)")
+    print(f"Summary: Sort={sort_hrs:.1f}h, Crossdock={crossdock_hrs:.1f}h, Transit={transit_hrs:.1f}h, "
+          f"Dwell={total_dwell_hrs:.1f}h (win:{window_dwell_hrs:.1f}, cpt:{cpt_dwell_hrs:.1f}) → TIT={timing.tit_hours:.1f}h")
 
-    # Show detailed breakdown for optimal paths only
-    print_section("OPTIMAL PATH DETAILS (by category)")
-
-    for od, path, result, num_touches in optimal_paths:
-        print(f"\n{'─' * 70}")
-        print(f"PATH TYPE: {path.path_type.value.upper()}")
-        print(f"PATH: {' → '.join(path.path_nodes)}")
-        print(f"Sort Level: {path.sort_level.value} → Dest Sort Level: {path.dest_sort_level.value}")
-        print(f"Touches: {num_touches} | Miles: {path.total_path_miles:.1f} | ATW: {path.atw_factor:.2f}")
-        print('─' * 70)
-
-        # Print each step in chronological order
-        print("\nSTEP-BY-STEP BREAKDOWN (chronological):")
-        for step in result.steps:
-            print_step_detail(step, facilities)
-
-        # Summary
-        print(f"\n{'─' * 40}")
-        print("TIMING SUMMARY:")
-        print('─' * 40)
-
-        inj_local = utc_to_local(result.required_injection_utc, origin_fac.timezone)
-        arr_local = utc_to_local(result.delivery_datetime_utc, dest_fac.timezone)
-
-        print(f"  Injection Time:  {result.required_injection_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-        print(f"                   {inj_local.strftime('%Y-%m-%d %H:%M')} local")
-        print(f"  Arrival Time:    {result.delivery_datetime_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-        print(f"                   {arr_local.strftime('%Y-%m-%d %H:%M')} local")
-        print(f"\n  Total TIT: {result.tit_hours:.2f} hours ({result.tit_hours / 24:.2f} days)")
-        print(f"  Sort Window Dwell: {result.sort_window_dwell_hours:.2f} hours")
-        print(f"  CPT Dwell: {result.cpt_dwell_hours:.2f} hours")
-        print(f"  Total Dwell: {result.total_dwell_hours:.2f} hours")
-        print(f"  Active Arcs Only: {'Yes' if result.uses_only_active_arcs else 'No'}")
-
-        # SLA check
-        if commitment:
-            sla_hours = (commitment.sla_days + commitment.sla_buffer_days) * 24
-            meets_sla = result.tit_hours <= sla_hours
-            slack = sla_hours - result.tit_hours
-
-            print(f"\n  SLA Target: {sla_hours:.0f} hours ({commitment.sla_days}+{commitment.sla_buffer_days} days)")
-            if meets_sla:
-                print(f"  ✓ MEETS SLA (slack: {slack:.2f} hours)")
-            else:
-                print(f"  ✗ MISSES SLA (over by: {-slack:.2f} hours)")
+    sla_status = "MET" if timing.sla_met else "MISS"
+    slack_sign = "+" if timing.sla_slack_hours >= 0 else ""
+    print(f"SLA: {timing.sla_days} day(s) = {timing.sla_target_hours:.1f}h target → {sla_status} ({slack_sign}{timing.sla_slack_hours:.1f}h slack)")
+    print(f"Uses only active arcs: {timing.uses_only_active_arcs}")
 
 
 def main():
-    diagnose_od_pair(
-        INPUT_FILE,
-        ORIGIN.upper(),
-        DEST.upper(),
-        SCENARIO_ID
+    print(f"{'='*90}")
+    print(f"SLA Path Model - Diagnostic Tool")
+    print(f"{'='*90}")
+    print(f"Origin: {ORIGIN}, Dest: {DEST}")
+    print(f"Filters: path_type={PATH_TYPE}, sort_level={SORT_LEVEL}, dest_sort_level={DEST_SORT_LEVEL}")
+    print()
+
+    # Load data
+    print("Loading inputs...")
+    loader = InputLoader(INPUT_FILE)
+    data = loader.load_all()
+    facilities = data["facilities"]
+
+    # Validate OD
+    if ORIGIN not in facilities:
+        print(f"ERROR: Origin facility '{ORIGIN}' not found")
+        return 1
+    if DEST not in facilities:
+        print(f"ERROR: Destination facility '{DEST}' not found")
+        return 1
+
+    origin_fac = facilities[ORIGIN]
+    dest_fac = facilities[DEST]
+
+    print(f"Origin: {ORIGIN} ({origin_fac.facility_type.value}), TZ: {origin_fac.timezone}")
+    print(f"Dest:   {DEST} ({dest_fac.facility_type.value}), TZ: {dest_fac.timezone}")
+
+    direct_miles = haversine_miles(origin_fac.lat, origin_fac.lon, dest_fac.lat, dest_fac.lon)
+    print(f"Direct distance: {direct_miles:.1f} miles")
+    print()
+
+    # Enumerate paths
+    print("Enumerating paths...")
+    enumerator = PathEnumerator(facilities, data["run_settings"])
+
+    if ORIGIN == DEST:
+        # O=D paths - create both DI and od_mm
+        candidates = []
+
+        # Direct injection (zone 0)
+        di_path = PathCandidate(
+            origin=ORIGIN,
+            dest=DEST,
+            path_nodes=[ORIGIN],
+            path_type=PathType.DIRECT_INJECTION,
+            sort_level=SortLevel.SORT_GROUP,
+            dest_sort_level=SortLevel.SORT_GROUP,
+            total_path_miles=0.0,
+            direct_miles=0.0,
+            atw_factor=1.0
+        )
+        candidates.append(di_path)
+
+        # od_mm (zone 1+) - only if origin is hub/hybrid (injection capable)
+        if origin_fac.facility_type in (FacilityType.HUB, FacilityType.HYBRID):
+            odmm_path = PathCandidate(
+                origin=ORIGIN,
+                dest=DEST,
+                path_nodes=[ORIGIN],
+                path_type=PathType.OD_MM,
+                sort_level=SortLevel.SORT_GROUP,
+                dest_sort_level=SortLevel.SORT_GROUP,
+                total_path_miles=0.0,
+                direct_miles=0.0,
+                atw_factor=1.0
+            )
+            candidates.append(odmm_path)
+    else:
+        candidates = enumerator.enumerate_paths_for_od(ORIGIN, DEST)
+
+    print(f"Found {len(candidates)} path candidates")
+
+    # Apply filters
+    if PATH_TYPE:
+        candidates = [c for c in candidates if c.path_type.value == PATH_TYPE]
+        print(f"After path_type filter: {len(candidates)} paths")
+
+    if SORT_LEVEL:
+        candidates = [c for c in candidates if c.sort_level.value == SORT_LEVEL]
+        print(f"After sort_level filter: {len(candidates)} paths")
+
+    if DEST_SORT_LEVEL:
+        candidates = [c for c in candidates if c.dest_sort_level.value == DEST_SORT_LEVEL]
+        print(f"After dest_sort_level filter: {len(candidates)} paths")
+
+    if not candidates:
+        print("\nNo paths found matching filters.")
+        return 0
+
+    # Calculate timings
+    print("\nCalculating timings...")
+    cpt_generator = CPTGenerator(
+        facilities=facilities,
+        arc_cpts=data["arc_cpts"]
     )
+
+    run_settings = data["run_settings"]
+    engine = TimingEngine(
+        facilities=facilities,
+        mileage_bands=data["mileage_bands"],
+        timing_params=data["timing_params"],
+        cpt_generator=cpt_generator,
+        reference_date=run_settings.reference_injection_date,
+        reference_injection_time=run_settings.reference_injection_time
+    )
+
+    timings = []
+    for path in candidates:
+        try:
+            timing = engine.calculate_path_timing(path)
+            timings.append(timing)
+        except Exception as e:
+            print(f"  Warning: Failed to time path {path.path_nodes}: {e}")
+
+    # Check SLA feasibility
+    print("Checking SLA feasibility...")
+    checker = FeasibilityChecker(data["service_commitments"])
+
+    # Calculate zone for this OD pair
+    zone = get_zone_for_distance(direct_miles, data["mileage_bands"])
+    zone_num = zone.zone if zone else 2  # Default to zone 2 if not found
+
+    # For DI paths, zone is always 0
+    # For od_mm and networked paths, use calculated zone
+    updated_timings = []
+    for timing in timings:
+        if timing.path.path_type == PathType.DIRECT_INJECTION:
+            path_zone = 0
+        else:
+            path_zone = zone_num
+        updated_timing = checker.check_feasibility(timing, path_zone)
+        updated_timings.append(updated_timing)
+
+    timings = updated_timings
+
+    # Sort by TIT
+    timings.sort(key=lambda t: (t.tit_hours, len(t.path.path_nodes), t.path.total_path_miles))
+
+    # Print summary
+    print()
+    print(f"{'='*90}")
+    print(f"=== {ORIGIN} → {DEST}: {len(timings)} paths found ===")
+    print(f"{'='*90}")
+    print(f"Reference injection: {run_settings.reference_injection_date.strftime('%Y-%m-%d')} "
+          f"{run_settings.reference_injection_time.strftime('%H:%M')} (origin local)")
+
+    print_summary_table(timings, facilities)
+
+    # Determine which details to show
+    detail_indices = []
+
+    if SHOW_ALL_DETAILS:
+        detail_indices = list(range(len(timings)))
+    elif SHOW_DETAIL_FOR is not None:
+        if 1 <= SHOW_DETAIL_FOR <= len(timings):
+            detail_indices = [SHOW_DETAIL_FOR - 1]
+        else:
+            print(f"\nWarning: SHOW_DETAIL_FOR={SHOW_DETAIL_FOR} is out of range (1-{len(timings)})")
+    elif SHOW_TOP_N_DETAILS > 0:
+        detail_indices = list(range(min(SHOW_TOP_N_DETAILS, len(timings))))
+
+    # Print detailed breakdowns
+    for idx in detail_indices:
+        print_detailed_breakdown(timings[idx], facilities, idx + 1)
+
+    print()
+    print("Done.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

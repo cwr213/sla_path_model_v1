@@ -14,7 +14,6 @@ logger = setup_logging()
 
 
 class InputLoader:
-
     REQUIRED_SHEETS = [
         "facilities",
         "zips",
@@ -59,7 +58,8 @@ class InputLoader:
                 lon=float(row["lon"]),
                 timezone=tz,
                 parent_hub_name=str(row["parent_hub_name"]).strip() if pd.notna(row.get("parent_hub_name")) else None,
-                regional_sort_hub=str(row["regional_sort_hub"]).strip() if pd.notna(row.get("regional_sort_hub")) else None,
+                regional_sort_hub=str(row["regional_sort_hub"]).strip() if pd.notna(
+                    row.get("regional_sort_hub")) else None,
                 is_injection_node=bool(row.get("is_injection_node", False)),
                 mm_sort_start_local=parse_time_value(row.get("mm_sort_start_local")),
                 mm_sort_end_local=parse_time_value(row.get("mm_sort_end_local")),
@@ -68,8 +68,10 @@ class InputLoader:
                 outbound_window_start_local=parse_time_value(row.get("outbound_window_start_local")),
                 outbound_window_end_local=parse_time_value(row.get("outbound_window_end_local")),
                 outbound_cpt_count=int(row["outbound_cpt_count"]) if pd.notna(row.get("outbound_cpt_count")) else None,
-                max_inbound_trucks_per_hour=float(row["max_inbound_trucks_per_hour"]) if pd.notna(row.get("max_inbound_trucks_per_hour")) else None,
-                max_outbound_trucks_per_hour=float(row["max_outbound_trucks_per_hour"]) if pd.notna(row.get("max_outbound_trucks_per_hour")) else None,
+                max_inbound_trucks_per_hour=float(row["max_inbound_trucks_per_hour"]) if pd.notna(
+                    row.get("max_inbound_trucks_per_hour")) else None,
+                max_outbound_trucks_per_hour=float(row["max_outbound_trucks_per_hour"]) if pd.notna(
+                    row.get("max_outbound_trucks_per_hour")) else None,
             )
             facilities[name] = facility
 
@@ -77,28 +79,86 @@ class InputLoader:
         return facilities
 
     def load_zips(self) -> pd.DataFrame:
+        """
+        Load zips sheet with year-based facility columns.
+
+        Expected format:
+        | zip | market | region | population | facility_2025 | facility_2026 | ... |
+
+        Blank facility_YYYY = zip not in coverage for that year.
+        """
         df = pd.read_excel(self.excel, sheet_name="zips")
         df["zip"] = df["zip"].astype(str).str.zfill(5)
-        logger.info(f"Loaded {len(df)} ZIP codes")
+
+        # Validate at least one facility_YYYY column exists
+        facility_cols = [c for c in df.columns if c.startswith('facility_')]
+        if not facility_cols:
+            raise ValueError(
+                "No facility_YYYY columns found in zips sheet. "
+                "Expected columns like facility_2024, facility_2025, etc."
+            )
+
+        # Validate required base columns
+        required_cols = ['zip', 'population']
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Zips sheet missing required columns: {missing}")
+
+        logger.info(f"Loaded {len(df)} ZIP codes with facility columns: {facility_cols}")
         return df
 
     def load_demand(self) -> pd.DataFrame:
+        """
+        Load demand sheet with three-flow shares.
+
+        Required columns:
+        - year, annual_pkgs
+        - offpeak_pct_of_annual, peak_pct_of_annual
+        - middle_mile_share_offpeak, middle_mile_share_peak
+        - zone_skip_share_offpeak, zone_skip_share_peak
+        - direct_injection_share_offpeak, direct_injection_share_peak
+        """
         df = pd.read_excel(self.excel, sheet_name="demand")
+
+        required_cols = [
+            'year', 'annual_pkgs',
+            'offpeak_pct_of_annual', 'peak_pct_of_annual',
+            'middle_mile_share_offpeak', 'middle_mile_share_peak',
+            'zone_skip_share_offpeak', 'zone_skip_share_peak',
+            'direct_injection_share_offpeak', 'direct_injection_share_peak'
+        ]
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Demand sheet missing required columns: {missing}")
+
         logger.info(f"Loaded demand data for {len(df)} year(s)")
         return df
 
     def load_injection_distribution(self) -> pd.DataFrame:
         df = pd.read_excel(self.excel, sheet_name="injection_distribution")
 
+        # Validate required columns
+        required_cols = ['facility_name', 'absolute_share']
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"injection_distribution sheet missing required columns: {missing}")
+
         total_share = df["absolute_share"].sum()
         if abs(total_share - 1.0) > 0.01:
-            logger.warning(f"Injection distribution shares sum to {total_share:.3f}, expected 1.0")
+            raise ValueError(f"Injection distribution shares must sum to 1.0, got {total_share:.4f}")
 
         logger.info(f"Loaded injection distribution for {len(df)} facilities")
         return df
 
     def load_scenarios(self) -> pd.DataFrame:
         df = pd.read_excel(self.excel, sheet_name="scenarios")
+
+        # Validate required columns
+        required_cols = ['scenario_id', 'year', 'day_type']
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Scenarios sheet missing required columns: {missing}")
+
         logger.info(f"Loaded {len(df)} scenarios")
         return df
 
@@ -133,7 +193,8 @@ class InputLoader:
             "induction_sort_minutes",
             "middle_mile_crossdock_minutes",
             "middle_mile_sort_minutes",
-            "last_mile_sort_minutes"
+            "sort_group_sort_minutes",
+            "route_sort_minutes"
         ]
 
         missing = [k for k in required_keys if k not in params]
@@ -144,7 +205,8 @@ class InputLoader:
             induction_sort_minutes=params["induction_sort_minutes"],
             middle_mile_crossdock_minutes=params["middle_mile_crossdock_minutes"],
             middle_mile_sort_minutes=params["middle_mile_sort_minutes"],
-            last_mile_sort_minutes=params["last_mile_sort_minutes"]
+            sort_group_sort_minutes=params["sort_group_sort_minutes"],
+            route_sort_minutes=params["route_sort_minutes"]
         )
 
         logger.info(f"Loaded timing params: {timing}")
@@ -163,7 +225,8 @@ class InputLoader:
             dest = str(row["dest"]).strip()
 
             if origin not in facilities:
-                raise ValueError(f"arc_cpts references unknown origin facility: {origin}")
+                logger.warning(f"arc_cpts references unknown origin facility: {origin}, skipping")
+                continue
 
             tz = facilities[origin].timezone
 
@@ -208,7 +271,20 @@ class InputLoader:
             value = row["value"]
             settings[key] = value
 
-        obj_type_str = str(settings.get("objective_type", "weighted_sla")).lower().strip()
+        # Validate required settings
+        required_keys = [
+            'objective_type',
+            'max_path_touches',
+            'max_path_atw_factor',
+            'reference_injection_date',
+            'reference_injection_time',
+            'top_paths_per_sort_level'
+        ]
+        missing = [k for k in required_keys if k not in settings]
+        if missing:
+            raise ValueError(f"run_settings sheet missing required keys: {missing}")
+
+        obj_type_str = str(settings["objective_type"]).lower().strip()
         try:
             objective_type = ObjectiveType(obj_type_str)
         except ValueError:
@@ -217,37 +293,30 @@ class InputLoader:
                 f"Must be one of {[e.value for e in ObjectiveType]}"
             )
 
-        ref_date = settings.get("reference_injection_date")
+        ref_date = settings["reference_injection_date"]
         if isinstance(ref_date, str):
             ref_date = datetime.fromisoformat(ref_date)
-        elif isinstance(ref_date, datetime):
-            pass
-        else:
-            ref_date = datetime(2025, 6, 15)
+        elif not isinstance(ref_date, datetime):
+            raise ValueError(f"Invalid reference_injection_date: {ref_date}")
 
-        ref_time = settings.get("reference_injection_time")
-        if ref_time is None:
-            ref_time = time(18, 0)  # Default 18:00
-        elif isinstance(ref_time, str):
+        ref_time = settings["reference_injection_time"]
+        if isinstance(ref_time, str):
             ref_time = parse_time_value(ref_time)
         elif isinstance(ref_time, time):
             pass
         elif isinstance(ref_time, datetime):
             ref_time = ref_time.time()
         else:
-            ref_time = time(18, 0)
+            raise ValueError(f"Invalid reference_injection_time: {ref_time}")
 
-        # Top N paths per OD × sort_level (default 3 if not specified)
-        top_paths = settings.get("top_paths_per_sort_level")
-        if top_paths is None or pd.isna(top_paths):
-            top_paths = 3
-        else:
-            top_paths = int(top_paths)
+        top_paths = int(settings["top_paths_per_sort_level"])
+        if top_paths < 1:
+            raise ValueError(f"top_paths_per_sort_level must be >= 1, got {top_paths}")
 
         run_settings = RunSettings(
             objective_type=objective_type,
-            max_path_touches=int(settings.get("max_path_touches", 4)),
-            max_path_atw_factor=float(settings.get("max_path_atw_factor", 1.5)),
+            max_path_touches=int(settings["max_path_touches"]),
+            max_path_atw_factor=float(settings["max_path_atw_factor"]),
             reference_injection_date=ref_date,
             reference_injection_time=ref_time,
             top_paths_per_sort_level=top_paths

@@ -32,6 +32,8 @@ class PathType(str, Enum):
     THREE_TOUCH = "3_touch"    # A → H → B (3 facilities)
     FOUR_TOUCH = "4_touch"     # A → H1 → H2 → B (4 facilities)
     FIVE_TOUCH = "5_touch"     # A → H1 → H2 → H3 → B (5 facilities)
+    DIRECT_INJECTION = "direct_injection"  # O=D, zone 0, shipper presorted
+    OD_MM = "od_mm"            # O=D, zone 1+, part of regular network flow
 
 
 class FlowType(str, Enum):
@@ -50,7 +52,8 @@ class StepType(str, Enum):
     TRANSIT = "transit"
     CROSSDOCK = "crossdock"
     FULL_SORT = "full_sort"
-    LAST_MILE_SORT = "last_mile_sort"
+    SORT_GROUP_SORT = "sort_group_sort"  # Market → Sort Group at destination
+    ROUTE_SORT = "route_sort"            # Sort Group → Route at destination
 
 
 @dataclass
@@ -58,7 +61,8 @@ class TimingParams:
     induction_sort_minutes: float
     middle_mile_crossdock_minutes: float
     middle_mile_sort_minutes: float
-    last_mile_sort_minutes: float
+    sort_group_sort_minutes: float  # Market → Sort Group at destination
+    route_sort_minutes: float       # Sort Group → Route at destination
 
 
 @dataclass
