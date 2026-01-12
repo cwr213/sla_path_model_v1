@@ -1,6 +1,7 @@
 """
 Input validation functions.
 """
+from collections import defaultdict
 from typing import Optional
 
 from .config import Facility, FacilityType, MileageBand, ServiceCommitment, TimingParams
@@ -26,6 +27,8 @@ class InputValidator:
         """Run all validations and return (errors, warnings)."""
         self.validate_facilities()
         self.validate_facility_references()
+        self.validate_regional_sort_hub_types()
+        self.validate_non_injection_hub_hierarchy()
         self.validate_injection_nodes()
         self.validate_mileage_bands()
         self.validate_timing_params()
@@ -86,6 +89,74 @@ class InputValidator:
                             f"Facility {name} has regional_sort_hub={fac.regional_sort_hub} which is a launch facility. "
                             f"Regional sort hubs must be hub or hybrid."
                         )
+
+    def validate_regional_sort_hub_types(self):
+        """
+        Validate that any facility serving as a regional_sort_hub is hub or hybrid.
+
+        RULE: If a facility is designated as an RSH (by any other facility),
+        it must be type 'hub' or 'hybrid', not 'launch'.
+        """
+        facilities: dict[str, Facility] = self.data["facilities"]
+
+        # Build set of all facilities serving as RSH for someone
+        facilities_serving_as_rsh = set()
+        for fac in facilities.values():
+            if fac.regional_sort_hub:
+                facilities_serving_as_rsh.add(fac.regional_sort_hub)
+
+        # Validate each RSH is hub or hybrid
+        for rsh_name in facilities_serving_as_rsh:
+            rsh_fac = facilities[rsh_name]
+            if rsh_fac.facility_type not in (FacilityType.HUB, FacilityType.HYBRID):
+                # Find which facilities reference this invalid RSH
+                referencing_facilities = [
+                    name for name, fac in facilities.items()
+                    if fac.regional_sort_hub == rsh_name
+                ]
+                self.errors.append(
+                    f"Facility {rsh_name} is designated as regional_sort_hub for {len(referencing_facilities)} "
+                    f"facilities {referencing_facilities[:3]}{'...' if len(referencing_facilities) > 3 else ''} "
+                    f"but has type '{rsh_fac.facility_type.value}'. RSHs must be 'hub' or 'hybrid'."
+                )
+
+    def validate_non_injection_hub_hierarchy(self):
+        """
+        Validate non-injection hubs have proper child relationships.
+
+        RULE: Non-injection hub/hybrid facilities are regional facilities designed
+        to handle regional traffic, not national intermediate traffic. They should
+        have children facilities defined via parent_hub_name or regional_sort_hub.
+
+        This validation warns if a non-injection hub has no children, suggesting
+        it may be misconfigured (should either be an injection node or have children).
+        """
+        facilities: dict[str, Facility] = self.data["facilities"]
+
+        # Build children mapping (both parent_hub and regional_sort_hub relationships)
+        children_map = defaultdict(set)
+        for name, fac in facilities.items():
+            if fac.parent_hub_name:
+                children_map[fac.parent_hub_name].add(name)
+            if fac.regional_sort_hub and fac.regional_sort_hub != name:
+                children_map[fac.regional_sort_hub].add(name)
+
+        # Check each non-injection hub/hybrid
+        for name, fac in facilities.items():
+            if fac.facility_type in (FacilityType.HUB, FacilityType.HYBRID) and not fac.is_injection_node:
+                if name not in children_map or len(children_map[name]) == 0:
+                    self.warnings.append(
+                        f"Facility {name} is a non-injection {fac.facility_type.value} with no children facilities. "
+                        f"Non-injection hubs are regional facilities designed for regional traffic. "
+                        f"Consider either: (1) making it an injection node, or (2) assigning it children "
+                        f"via parent_hub_name or regional_sort_hub."
+                    )
+                else:
+                    children_list = sorted(list(children_map[name]))
+                    logger.debug(
+                        f"Non-injection hub {name} serves {len(children_list)} children: "
+                        f"{children_list[:5]}{'...' if len(children_list) > 5 else ''}"
+                    )
 
     def validate_injection_nodes(self):
         """Validate injection distribution references valid facilities."""

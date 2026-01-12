@@ -39,14 +39,20 @@ class PathEnumerator:
                 self.parent_hub[name] = fac.parent_hub_name
 
         self.regional_hub = {}
+        self.regional_hub_to_facilities = {}  # Reverse mapping: RSH -> list of facilities it serves
         for name, fac in self.facilities.items():
             if fac.regional_sort_hub:
                 self.regional_hub[name] = fac.regional_sort_hub
+                # Build reverse mapping
+                if fac.regional_sort_hub not in self.regional_hub_to_facilities:
+                    self.regional_hub_to_facilities[fac.regional_sort_hub] = []
+                self.regional_hub_to_facilities[fac.regional_sort_hub].append(name)
 
         logger.info(
             f"Path enumeration: {len(self.hubs)} hubs, {len(self.hybrids)} hybrids, "
-            f"{len(self.launches)} launches"
+            f"{len(self.launches)} launches, {len(self.regional_hub_to_facilities)} regional sort hubs"
         )
+
 
     def enumerate_paths_for_od(self, origin: str, dest: str) -> list[PathCandidate]:
         if origin not in self.facilities:
@@ -164,25 +170,57 @@ class PathEnumerator:
         return paths
 
     def _is_valid_path_structure(self, path: list[str]) -> bool:
+        """
+        Validate path structure with hierarchy enforcement.
+
+        Rules:
+        1. Origin must be hub or hybrid
+        2. Destination must be launch or hybrid
+        3. All intermediates must be hub or hybrid
+        4. Non-injection intermediates can only route to their children
+        5. If destination has parent_hub, it must be in path (unless origin is parent or shares parent)
+        """
         if len(path) < 2:
             return False
 
         origin = path[0]
         dest = path[-1]
 
+        # Rule 1: Origin must be hub or hybrid
         origin_fac = self.facilities[origin]
         if origin_fac.facility_type not in (FacilityType.HUB, FacilityType.HYBRID):
             return False
 
+        # Rule 2: Destination must be launch or hybrid
         dest_fac = self.facilities[dest]
         if dest_fac.facility_type not in (FacilityType.LAUNCH, FacilityType.HYBRID):
             return False
 
-        for node in path[1:-1]:
+        # Rule 3 & 4: Validate intermediates with hierarchy enforcement
+        for i in range(1, len(path) - 1):
+            node = path[i]
             node_fac = self.facilities[node]
+
+            # All intermediates must be hub or hybrid
             if node_fac.facility_type not in (FacilityType.HUB, FacilityType.HYBRID):
                 return False
 
+            # HIERARCHY ENFORCEMENT: Non-injection intermediates can only route to children
+            if not node_fac.is_injection_node:
+                next_node = path[i + 1]
+                next_fac = self.facilities[next_node]
+
+                # Check if next_node is a child of current node
+                is_child = (
+                        next_fac.parent_hub_name == node or
+                        next_fac.regional_sort_hub == node
+                )
+
+                if not is_child:
+                    # Non-injection intermediate routing to non-child: invalid path
+                    return False
+
+        # Rule 5: Existing parent_hub validation for destination
         if dest in self.parent_hub:
             parent = self.parent_hub[dest]
             origin_parent = self.parent_hub.get(origin)
@@ -192,6 +230,7 @@ class PathEnumerator:
                     return False
 
         return True
+
 
     def _expand_path_to_candidates(
             self,
@@ -245,31 +284,55 @@ class PathEnumerator:
             atw_factor=atw_factor
         ))
 
-        # REGION: Only valid for non-direct paths where 2nd-to-last is regional_sort_hub
-        if not is_direct and dest_regional_hub and second_to_last == dest_regional_hub:
-            # Enumerate two variants: hub sorts to MARKET or SORT_GROUP
-            candidates.append(PathCandidate(
-                origin=origin,
-                dest=dest,
-                path_nodes=path_nodes,
-                path_type=path_type,
-                sort_level=SortLevel.REGION,
-                dest_sort_level=SortLevel.MARKET,
-                total_path_miles=total_miles,
-                direct_miles=direct_miles,
-                atw_factor=atw_factor
-            ))
-            candidates.append(PathCandidate(
-                origin=origin,
-                dest=dest,
-                path_nodes=path_nodes,
-                path_type=path_type,
-                sort_level=SortLevel.REGION,
-                dest_sort_level=SortLevel.SORT_GROUP,
-                total_path_miles=total_miles,
-                direct_miles=direct_miles,
-                atw_factor=atw_factor
-            ))
+        # REGION: Valid only when destination is a regional_sort_hub
+        # Check if dest is an RSH (serves itself or other facilities)
+        dest_is_rsh = dest in self.regional_hub_to_facilities
+
+        if dest_is_rsh:
+            # Destination can handle region-level breakdown
+            if is_direct:
+                # Direct path to RSH: dest does region→sort_group + last mile
+                # Only one variant: dest_sort_level = MARKET
+                candidates.append(PathCandidate(
+                    origin=origin,
+                    dest=dest,
+                    path_nodes=path_nodes,
+                    path_type=path_type,
+                    sort_level=SortLevel.REGION,
+                    dest_sort_level=SortLevel.MARKET,
+                    total_path_miles=total_miles,
+                    direct_miles=direct_miles,
+                    atw_factor=atw_factor
+                ))
+            else:
+                # Multi-hop path to RSH
+                # Always create variant where dest does full sort + last mile
+                candidates.append(PathCandidate(
+                    origin=origin,
+                    dest=dest,
+                    path_nodes=path_nodes,
+                    path_type=path_type,
+                    sort_level=SortLevel.REGION,
+                    dest_sort_level=SortLevel.MARKET,
+                    total_path_miles=total_miles,
+                    direct_miles=direct_miles,
+                    atw_factor=atw_factor
+                ))
+
+                # If 2nd-to-last is dest's RSH, also create variant where it does full sort
+                # and dest only does last mile
+                if dest_regional_hub and second_to_last == dest_regional_hub:
+                    candidates.append(PathCandidate(
+                        origin=origin,
+                        dest=dest,
+                        path_nodes=path_nodes,
+                        path_type=path_type,
+                        sort_level=SortLevel.REGION,
+                        dest_sort_level=SortLevel.SORT_GROUP,
+                        total_path_miles=total_miles,
+                        direct_miles=direct_miles,
+                        atw_factor=atw_factor
+                    ))
 
         return candidates
 

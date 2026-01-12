@@ -11,13 +11,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # ============== CONFIGURATION ==============
-ORIGIN = "PHL01"
-DEST = "EWR01"
+ORIGIN = "ATL02"
+DEST = "BOS01"
 PATH_TYPE = None              # None = all, or "direct_injection", "od_mm", "2_touch", "3_touch", "4_touch"
 SORT_LEVEL = None             # None = all, or "region", "market", "sort_group"
 DEST_SORT_LEVEL = None        # None = all, or "region", "market", "sort_group"
 SHOW_DETAIL_FOR = None        # None = summary only, or path number (1, 2, 3...) for detailed breakdown
-SHOW_TOP_N_DETAILS = 1        # Show detailed breakdown for top N paths (0 = summary only, ignored if SHOW_DETAIL_FOR is set)
+SHOW_TOP_N_DETAILS = 0        # Show detailed breakdown for top N paths (0 = summary only, ignored if SHOW_DETAIL_FOR is set)
 SHOW_ALL_DETAILS = False      # True = show detailed breakdown for ALL paths (overrides above)
 INPUT_FILE = r"C:\Users\ChrisRallis\Desktop\python_projects\sla_path_model_v1\data\input_sla_model_v1.xlsx"
 # ===========================================
