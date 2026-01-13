@@ -33,11 +33,7 @@ class PathEnumerator:
 
         self.sorting_facilities = {**self.hubs, **self.hybrids}
 
-        self.parent_hub = {}
-        for name, fac in self.facilities.items():
-            if fac.parent_hub_name:
-                self.parent_hub[name] = fac.parent_hub_name
-
+        # Build regional_sort_hub mappings
         self.regional_hub = {}
         self.regional_hub_to_facilities = {}  # Reverse mapping: RSH -> list of facilities it serves
         for name, fac in self.facilities.items():
@@ -52,7 +48,6 @@ class PathEnumerator:
             f"Path enumeration: {len(self.hubs)} hubs, {len(self.hybrids)} hybrids, "
             f"{len(self.launches)} launches, {len(self.regional_hub_to_facilities)} regional sort hubs"
         )
-
 
     def enumerate_paths_for_od(self, origin: str, dest: str) -> list[PathCandidate]:
         if origin not in self.facilities:
@@ -177,8 +172,8 @@ class PathEnumerator:
         1. Origin must be hub or hybrid
         2. Destination must be launch or hybrid
         3. All intermediates must be hub or hybrid
-        4. Non-injection intermediates can only route to their children
-        5. If destination has parent_hub, it must be in path (unless origin is parent or shares parent)
+        4. Non-injection intermediates can only route to their children (via regional_sort_hub)
+        5. If destination has regional_sort_hub (other than itself), RSH must be in path
         """
         if len(path) < 2:
             return False
@@ -210,27 +205,27 @@ class PathEnumerator:
                 next_node = path[i + 1]
                 next_fac = self.facilities[next_node]
 
-                # Check if next_node is a child of current node
-                is_child = (
-                        next_fac.parent_hub_name == node or
-                        next_fac.regional_sort_hub == node
-                )
+                # Check if next_node is a child of current node (via regional_sort_hub)
+                is_child = (next_fac.regional_sort_hub == node)
 
                 if not is_child:
                     # Non-injection intermediate routing to non-child: invalid path
                     return False
 
-        # Rule 5: Existing parent_hub validation for destination
-        if dest in self.parent_hub:
-            parent = self.parent_hub[dest]
-            origin_parent = self.parent_hub.get(origin)
+        # Rule 5: If destination has regional_sort_hub (not self-referencing), RSH must be in path
+        # This ensures proper last mile hierarchy
+        if dest in self.regional_hub:
+            rsh = self.regional_hub[dest]
+            # Only enforce if RSH is not the destination itself
+            if rsh != dest:
+                # Check if origin is the RSH or if RSH appears in path
+                origin_rsh = self.regional_hub.get(origin)
 
-            if origin != parent and origin_parent != parent:
-                if parent not in path:
-                    return False
+                if origin != rsh and origin_rsh != rsh:
+                    if rsh not in path:
+                        return False
 
         return True
-
 
     def _expand_path_to_candidates(
             self,
@@ -284,15 +279,49 @@ class PathEnumerator:
             atw_factor=atw_factor
         ))
 
-        # REGION: Valid only when destination is a regional_sort_hub
-        # Check if dest is an RSH (serves itself or other facilities)
+        # REGION: Valid when 2nd-to-last facility is destination's RSH,
+        # OR when destination itself IS an RSH
+        # NOT valid for direct paths from RSH to child (that's just MARKET/SORT_GROUP)
+
+        # Case 1: Multi-hop path where 2nd-to-last IS the destination's RSH
+        # Example: ATL02 → PHL01 → ABE01 (where ABE01.regional_sort_hub = PHL01)
+        # PHL01 does region-level sort, then ABE01 receives presorted freight
+        if dest_regional_hub and not is_direct and second_to_last == dest_regional_hub:
+            # Two variants based on how much sorting destination does:
+            # 1a. RSH sorts to market level, destination does sort_group→route (full LM sort)
+            candidates.append(PathCandidate(
+                origin=origin,
+                dest=dest,
+                path_nodes=path_nodes,
+                path_type=path_type,
+                sort_level=SortLevel.REGION,
+                dest_sort_level=SortLevel.MARKET,
+                total_path_miles=total_miles,
+                direct_miles=direct_miles,
+                atw_factor=atw_factor
+            ))
+            # 1b. RSH sorts to sort_group level, destination only does route sort (minimal LM sort)
+            candidates.append(PathCandidate(
+                origin=origin,
+                dest=dest,
+                path_nodes=path_nodes,
+                path_type=path_type,
+                sort_level=SortLevel.REGION,
+                dest_sort_level=SortLevel.SORT_GROUP,
+                total_path_miles=total_miles,
+                direct_miles=direct_miles,
+                atw_factor=atw_factor
+            ))
+
+        # Case 2: Destination IS an RSH (self-referencing or serves others)
+        # Example: ATL02 → PHL01 (where PHL01.regional_sort_hub = PHL01)
+        # PHL01 can handle region-level breakdown for itself
         dest_is_rsh = dest in self.regional_hub_to_facilities
 
         if dest_is_rsh:
-            # Destination can handle region-level breakdown
+            # Destination can handle region-level breakdown for itself
             if is_direct:
                 # Direct path to RSH: dest does region→sort_group + last mile
-                # Only one variant: dest_sort_level = MARKET
                 candidates.append(PathCandidate(
                     origin=origin,
                     dest=dest,
@@ -305,8 +334,7 @@ class PathEnumerator:
                     atw_factor=atw_factor
                 ))
             else:
-                # Multi-hop path to RSH
-                # Always create variant where dest does full sort + last mile
+                # Multi-hop to RSH destination: dest does full sort + last mile
                 candidates.append(PathCandidate(
                     origin=origin,
                     dest=dest,
@@ -318,21 +346,6 @@ class PathEnumerator:
                     direct_miles=direct_miles,
                     atw_factor=atw_factor
                 ))
-
-                # If 2nd-to-last is dest's RSH, also create variant where it does full sort
-                # and dest only does last mile
-                if dest_regional_hub and second_to_last == dest_regional_hub:
-                    candidates.append(PathCandidate(
-                        origin=origin,
-                        dest=dest,
-                        path_nodes=path_nodes,
-                        path_type=path_type,
-                        sort_level=SortLevel.REGION,
-                        dest_sort_level=SortLevel.SORT_GROUP,
-                        total_path_miles=total_miles,
-                        direct_miles=direct_miles,
-                        atw_factor=atw_factor
-                    ))
 
         return candidates
 

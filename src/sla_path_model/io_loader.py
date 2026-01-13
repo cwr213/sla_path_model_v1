@@ -57,7 +57,6 @@ class InputLoader:
                 lat=float(row["lat"]),
                 lon=float(row["lon"]),
                 timezone=tz,
-                parent_hub_name=str(row["parent_hub_name"]).strip() if pd.notna(row.get("parent_hub_name")) else None,
                 regional_sort_hub=str(row["regional_sort_hub"]).strip() if pd.notna(
                     row.get("regional_sort_hub")) else None,
                 is_injection_node=bool(row.get("is_injection_node", False)),

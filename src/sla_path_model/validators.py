@@ -71,13 +71,10 @@ class InputValidator:
                     self.errors.append(f"Injection facility {name} must have outbound_cpt_count >= 1")
 
     def validate_facility_references(self):
-        """Validate that parent_hub_name and regional_sort_hub references exist and are valid types."""
+        """Validate that regional_sort_hub references exist and are valid types."""
         facilities: dict[str, Facility] = self.data["facilities"]
 
         for name, fac in facilities.items():
-            if fac.parent_hub_name and fac.parent_hub_name not in facilities:
-                self.errors.append(f"Facility {name} references unknown parent_hub_name: {fac.parent_hub_name}")
-
             if fac.regional_sort_hub:
                 if fac.regional_sort_hub not in facilities:
                     self.errors.append(f"Facility {name} references unknown regional_sort_hub: {fac.regional_sort_hub}")
@@ -126,18 +123,16 @@ class InputValidator:
 
         RULE: Non-injection hub/hybrid facilities are regional facilities designed
         to handle regional traffic, not national intermediate traffic. They should
-        have children facilities defined via parent_hub_name or regional_sort_hub.
+        have children facilities defined via regional_sort_hub.
 
         This validation warns if a non-injection hub has no children, suggesting
         it may be misconfigured (should either be an injection node or have children).
         """
         facilities: dict[str, Facility] = self.data["facilities"]
 
-        # Build children mapping (both parent_hub and regional_sort_hub relationships)
+        # Build children mapping (facilities that designate this facility as their RSH)
         children_map = defaultdict(set)
         for name, fac in facilities.items():
-            if fac.parent_hub_name:
-                children_map[fac.parent_hub_name].add(name)
             if fac.regional_sort_hub and fac.regional_sort_hub != name:
                 children_map[fac.regional_sort_hub].add(name)
 
@@ -149,7 +144,7 @@ class InputValidator:
                         f"Facility {name} is a non-injection {fac.facility_type.value} with no children facilities. "
                         f"Non-injection hubs are regional facilities designed for regional traffic. "
                         f"Consider either: (1) making it an injection node, or (2) assigning it children "
-                        f"via parent_hub_name or regional_sort_hub."
+                        f"via regional_sort_hub."
                     )
                 else:
                     children_list = sorted(list(children_map[name]))

@@ -132,7 +132,6 @@ class Facility:
     lat: float
     lon: float
     timezone: ZoneInfo
-    parent_hub_name: Optional[str]
     regional_sort_hub: Optional[str]
     is_injection_node: bool
 
