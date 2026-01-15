@@ -143,9 +143,16 @@ def print_detailed_breakdown(timing: PathTimingResult, facilities: dict[str, Fac
                 total_sort_mins += step.duration_minutes
 
             elif step.step_type == StepType.SORT_GROUP_SORT:
-                mm_window = step_fac.get_mm_sort_window()
-                if mm_window:
-                    notes = f"MM window: {format_window(mm_window.start_local, mm_window.end_local)}"
+                # Sort_group_sort uses LM window at launch facilities (corrected logic)
+                if step_fac.facility_type == FacilityType.LAUNCH:
+                    lm_window = step_fac.get_lm_sort_window()
+                    if lm_window:
+                        notes = f"LM window: {format_window(lm_window.start_local, lm_window.end_local)}"
+                else:
+                    # Should not happen with corrected logic, but handle gracefully
+                    mm_window = step_fac.get_mm_sort_window()
+                    if mm_window:
+                        notes = f"MM window: {format_window(mm_window.start_local, mm_window.end_local)}"
                 total_sort_mins += step.duration_minutes
 
             elif step.step_type == StepType.ROUTE_SORT:

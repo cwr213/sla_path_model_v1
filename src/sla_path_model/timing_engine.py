@@ -56,7 +56,7 @@ class TimingEngine:
         - DI at Hub/Hybrid: induction_sort + route_sort (induction includes sort_group)
         - od_mm at Hub/Hybrid: induction_sort + route_sort (same as DI at Hub/Hybrid)
         - Networked, dest_sort_level=sort_group: induction + transit + route_sort
-        - Networked, dest_sort_level=market: induction + transit + sort_group_sort + route_sort
+        - Networked, dest_sort_level=market: induction + transit + sort_group_sort (at launch only) + route_sort
         """
         dest_fac = self.facilities[path.dest]
         origin_fac = self.facilities[path.origin]
@@ -194,37 +194,45 @@ class TimingEngine:
 
         # Step 3: Destination sorts (sort_group_sort and route_sort)
         #
-        # sort_group_sort needed when:
-        # - DI at launch (no induction, so need sort_group_sort)
-        # - Networked path arriving at market level (dest_sort_level = MARKET)
+        # OPERATIONAL REALITY:
+        # - Hub/Hybrid sort operations: induction_sort and middle_mile_sort are CONSTANT time
+        #   regardless of sort_level (REGION/MARKET/SORT_GROUP). The sort_level just determines
+        #   how many destination sort points are allocated. If sorting to SORT_GROUP level,
+        #   the sort_group breakdown is ALREADY INCLUDED in the induction/MM sort time.
         #
-        # sort_group_sort NOT needed when:
-        # - DI/od_mm at hub/hybrid (induction already includes sort_group)
-        # - Networked path arriving at sort_group level
+        # - Launch facilities: Cannot do MM sort (no sorting capability during MM window).
+        #   They only do LM sort. If they receive freight sorted only to MARKET level,
+        #   they must do market → sort_group breakdown during LM window.
         #
-        # route_sort ALWAYS needed
+        # sort_group_sort should ONLY apply when:
+        # 1. Destination is a LAUNCH facility, AND
+        # 2. Freight arrives at MARKET level (not already sorted to sort_group)
+        #
+        # sort_group_sort should NOT apply when:
+        # 1. Destination is hub/hybrid (they did it during induction/MM sort already)
+        # 2. Freight arrives already at SORT_GROUP level (already done upstream)
+        # 3. O=D at hub/hybrid (sort_group sort was part of induction)
+        #
+        # route_sort ALWAYS needed (sort_group → route breakdown)
 
         # Determine if we need sort_group_sort
-        if is_di or is_od_mm:
-            # O=D scenarios
-            if origin_is_hub_or_hybrid:
-                # Induction already sorted to sort_group, skip sort_group_sort
-                needs_sort_group_sort = False
-            else:
-                # Launch facility - need sort_group_sort
+        needs_sort_group_sort = False
+
+        if dest_fac.facility_type == FacilityType.LAUNCH:
+            # Launch facilities must do sort_group sort if freight arrives at market level
+            # (upstream hub didn't sort to sort_group for this launch)
+            if path.dest_sort_level == SortLevel.MARKET:
                 needs_sort_group_sort = True
-        else:
-            # Networked paths - depends on dest_sort_level
-            needs_sort_group_sort = (path.dest_sort_level == SortLevel.MARKET)
+        # If dest is hub/hybrid: sort_group sort already happened during induction/MM sort
 
-        # Apply sort_group_sort if needed (uses MM window - it's a MM-type operation)
+        # Apply sort_group_sort if needed (uses LM window at launch facilities)
         if needs_sort_group_sort:
-            mm_sort_window = dest_fac.get_mm_sort_window()
+            lm_sort_window = dest_fac.get_lm_sort_window()
 
-            if mm_sort_window:
+            if lm_sort_window:
                 sg_start_utc, window_dwell = align_to_window_start(
                     current_time_utc,
-                    mm_sort_window,
+                    lm_sort_window,
                     self.timing_params.sort_group_sort_minutes
                 )
             else:
