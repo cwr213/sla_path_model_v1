@@ -10,12 +10,28 @@ logger = setup_logging()
 
 class PathEnumerator:
 
-    def __init__(self, facilities: dict[str, Facility], run_settings: RunSettings):
+    def __init__(self, facilities: dict[str, Facility], run_settings: RunSettings, injection_df):
         self.facilities = facilities
         self.max_path_touches = run_settings.max_path_touches
         self.max_atw_factor = run_settings.max_path_atw_factor
 
+        self._build_injection_facilities(injection_df)
         self._build_facility_lookups()
+
+    def _build_injection_facilities(self, injection_df):
+        """Build set of facilities that receive injection volume."""
+        share_cols = [c for c in injection_df.columns if c.startswith('share_')]
+        if not share_cols and 'absolute_share' in injection_df.columns:
+            share_cols = ['absolute_share']
+
+        self.injection_facilities = set()
+        for _, row in injection_df.iterrows():
+            fac_name = str(row["facility_name"]).strip()
+            # If facility has non-zero share in ANY year, it's an injection facility
+            if any(row[col] > 0 for col in share_cols if col in row):
+                self.injection_facilities.add(fac_name)
+
+        logger.info(f"Identified {len(self.injection_facilities)} injection facilities")
 
     def _build_facility_lookups(self):
         self.hubs = {
@@ -201,7 +217,7 @@ class PathEnumerator:
                 return False
 
             # HIERARCHY ENFORCEMENT: Non-injection intermediates can only route to children
-            if not node_fac.is_injection_node:
+            if node not in self.injection_facilities:
                 next_node = path[i + 1]
                 next_fac = self.facilities[next_node]
 
@@ -356,7 +372,8 @@ def enumerate_all_paths(
 ) -> dict[tuple[str, str], list[PathCandidate]]:
     enumerator = PathEnumerator(
         facilities=data["facilities"],
-        run_settings=data["run_settings"]
+        run_settings=data["run_settings"],
+        injection_df=data["injection_distribution"]
     )
 
     # Separate DI (zone 0) from networked flows (zone 1+)

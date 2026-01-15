@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # ============== CONFIGURATION ==============
 ORIGIN = "ATL02"
-DEST = "ABE01"
+DEST = "ATL02"
 PATH_TYPE = None              # None = all, or "direct_injection", "od_mm", "2_touch", "3_touch", "4_touch"
 SORT_LEVEL = None             # None = all, or "region", "market", "sort_group"
 DEST_SORT_LEVEL = None        # None = all, or "region", "market", "sort_group"

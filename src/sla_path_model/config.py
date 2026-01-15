@@ -133,7 +133,6 @@ class Facility:
     lon: float
     timezone: ZoneInfo
     regional_sort_hub: Optional[str]
-    is_injection_node: bool
 
     mm_sort_start_local: Optional[time]
     mm_sort_end_local: Optional[time]

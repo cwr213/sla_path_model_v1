@@ -59,7 +59,6 @@ class InputLoader:
                 timezone=tz,
                 regional_sort_hub=str(row["regional_sort_hub"]).strip() if pd.notna(
                     row.get("regional_sort_hub")) else None,
-                is_injection_node=bool(row.get("is_injection_node", False)),
                 mm_sort_start_local=parse_time_value(row.get("mm_sort_start_local")),
                 mm_sort_end_local=parse_time_value(row.get("mm_sort_end_local")),
                 lm_sort_start_local=parse_time_value(row.get("lm_sort_start_local")),
@@ -136,17 +135,45 @@ class InputLoader:
     def load_injection_distribution(self) -> pd.DataFrame:
         df = pd.read_excel(self.excel, sheet_name="injection_distribution")
 
-        # Validate required columns
-        required_cols = ['facility_name', 'absolute_share']
-        missing = [c for c in required_cols if c not in df.columns]
-        if missing:
-            raise ValueError(f"injection_distribution sheet missing required columns: {missing}")
+        # Validate facility_name column exists
+        if 'facility_name' not in df.columns:
+            raise ValueError("injection_distribution sheet missing required column: facility_name")
 
-        total_share = df["absolute_share"].sum()
-        if abs(total_share - 1.0) > 0.01:
-            raise ValueError(f"Injection distribution shares must sum to 1.0, got {total_share:.4f}")
+        # Find share_YYYY columns (new format)
+        share_cols = [c for c in df.columns if c.startswith('share_')]
 
-        logger.info(f"Loaded injection distribution for {len(df)} facilities")
+        if share_cols:
+            # New year-based format
+            logger.info(f"Using year-based injection distribution format with columns: {share_cols}")
+
+            # Validate each year column sums to 1.0
+            for col in share_cols:
+                total = df[col].sum()
+                if abs(total - 1.0) > 0.01:
+                    raise ValueError(
+                        f"Injection shares for {col} must sum to 1.0, got {total:.4f}"
+                    )
+
+            logger.info(f"Loaded injection distribution for {len(df)} facilities across {len(share_cols)} years")
+
+        elif 'absolute_share' in df.columns:
+            # Legacy single-column format - provide migration guidance
+            logger.warning(
+                "Using legacy single-column 'absolute_share' format in injection_distribution. "
+                "Consider migrating to year-based 'share_YYYY' columns (e.g., share_2024, share_2025)."
+            )
+
+            total_share = df["absolute_share"].sum()
+            if abs(total_share - 1.0) > 0.01:
+                raise ValueError(f"Injection distribution shares must sum to 1.0, got {total_share:.4f}")
+
+            logger.info(f"Loaded injection distribution for {len(df)} facilities")
+        else:
+            raise ValueError(
+                "injection_distribution sheet must have either 'absolute_share' column (legacy) "
+                "or 'share_YYYY' columns (e.g., share_2024, share_2025)"
+            )
+
         return df
 
     def load_scenarios(self) -> pd.DataFrame:

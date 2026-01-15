@@ -63,12 +63,12 @@ class InputValidator:
                 if fac.lm_sort_start_local is None or fac.lm_sort_end_local is None:
                     self.warnings.append(f"Facility {name} ({fac.facility_type.value}) missing LM sort window")
 
-            # Injection nodes should have outbound windows
-            if fac.is_injection_node:
+            # Hubs/Hybrids should have outbound windows (for CPT generation)
+            if fac.facility_type in (FacilityType.HUB, FacilityType.HYBRID):
                 if fac.outbound_window_start_local is None or fac.outbound_window_end_local is None:
-                    self.errors.append(f"Injection facility {name} missing outbound window")
+                    self.warnings.append(f"Hub/Hybrid {name} missing outbound window")
                 if fac.outbound_cpt_count is None or fac.outbound_cpt_count < 1:
-                    self.errors.append(f"Injection facility {name} must have outbound_cpt_count >= 1")
+                    self.warnings.append(f"Hub/Hybrid {name} missing outbound_cpt_count")
 
     def validate_facility_references(self):
         """Validate that regional_sort_hub references exist and are valid types."""
@@ -129,6 +129,19 @@ class InputValidator:
         it may be misconfigured (should either be an injection node or have children).
         """
         facilities: dict[str, Facility] = self.data["facilities"]
+        injection_dist = self.data["injection_distribution"]
+
+        # Build set of facilities that receive injection volume
+        share_cols = [c for c in injection_dist.columns if c.startswith('share_')]
+        if not share_cols and 'absolute_share' in injection_dist.columns:
+            share_cols = ['absolute_share']
+
+        injection_facilities = set()
+        for _, row in injection_dist.iterrows():
+            fac_name = str(row["facility_name"]).strip()
+            # If facility has non-zero share in ANY year, it's an injection facility
+            if any(row[col] > 0 for col in share_cols if col in row):
+                injection_facilities.add(fac_name)
 
         # Build children mapping (facilities that designate this facility as their RSH)
         children_map = defaultdict(set)
@@ -138,12 +151,13 @@ class InputValidator:
 
         # Check each non-injection hub/hybrid
         for name, fac in facilities.items():
-            if fac.facility_type in (FacilityType.HUB, FacilityType.HYBRID) and not fac.is_injection_node:
+            is_injection_facility = name in injection_facilities
+            if fac.facility_type in (FacilityType.HUB, FacilityType.HYBRID) and not is_injection_facility:
                 if name not in children_map or len(children_map[name]) == 0:
                     self.warnings.append(
                         f"Facility {name} is a non-injection {fac.facility_type.value} with no children facilities. "
                         f"Non-injection hubs are regional facilities designed for regional traffic. "
-                        f"Consider either: (1) making it an injection node, or (2) assigning it children "
+                        f"Consider either: (1) adding it to injection_distribution, or (2) assigning it children "
                         f"via regional_sort_hub."
                     )
                 else:
@@ -158,6 +172,11 @@ class InputValidator:
         facilities: dict[str, Facility] = self.data["facilities"]
         injection_dist = self.data["injection_distribution"]
 
+        # Find share columns (year-based or legacy)
+        share_cols = [c for c in injection_dist.columns if c.startswith('share_')]
+        if not share_cols and 'absolute_share' in injection_dist.columns:
+            share_cols = ['absolute_share']
+
         for _, row in injection_dist.iterrows():
             fac_name = str(row["facility_name"]).strip()
 
@@ -166,18 +185,17 @@ class InputValidator:
                 continue
 
             fac = facilities[fac_name]
-            if not fac.is_injection_node:
-                self.warnings.append(f"Facility {fac_name} in injection distribution but is_injection_node=False")
 
-            if fac.facility_type not in (FacilityType.HUB, FacilityType.HYBRID):
-                self.errors.append(
-                    f"Injection facility {fac_name} must be hub or hybrid, got {fac.facility_type.value}")
+            # Check if facility receives any injection volume
+            has_injection = any(row[col] > 0 for col in share_cols if col in row)
 
-        # Check all injection nodes are in distribution
-        injection_facs = set(injection_dist["facility_name"].astype(str).str.strip())
-        for name, fac in facilities.items():
-            if fac.is_injection_node and name not in injection_facs:
-                self.warnings.append(f"Facility {name} has is_injection_node=True but not in injection_distribution")
+            if has_injection:
+                # Warn if launch facility receives injection (typically only hubs/hybrids)
+                if fac.facility_type == FacilityType.LAUNCH:
+                    self.warnings.append(
+                        f"Launch facility {fac_name} receives injection volume. "
+                        f"Verify this is intentional (typically only hubs/hybrids accept injection)."
+                    )
 
     def validate_mileage_bands(self):
         """Validate mileage bands are contiguous and non-overlapping."""

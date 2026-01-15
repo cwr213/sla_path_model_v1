@@ -104,19 +104,63 @@ class DemandBuilder:
         )
 
     def _build_injection_shares(self):
-        """Build injection facility shares for middle mile."""
-        self.injection_shares = {}
+        """Build injection facility shares for middle mile by year."""
+        # Check if using new year-based format or legacy format
+        share_cols = [c for c in self.injection_df.columns if c.startswith('share_')]
 
-        for _, row in self.injection_df.iterrows():
-            fac_name = str(row["facility_name"]).strip()
-            share = float(row["absolute_share"])
-            self.injection_shares[fac_name] = share
+        if share_cols:
+            # New year-based format
+            self.injection_shares_by_year = {}
 
-        total = sum(self.injection_shares.values())
-        if abs(total - 1.0) > 0.01:
-            raise ValueError(f"Injection shares must sum to 1.0, got {total:.4f}")
+            for col in share_cols:
+                year = int(col.replace('share_', ''))
+                shares = {}
 
-        logger.info(f"Built injection shares for {len(self.injection_shares)} facilities")
+                for _, row in self.injection_df.iterrows():
+                    fac_name = str(row["facility_name"]).strip()
+                    share = float(row[col])
+                    if share > 0:  # Only include facilities with non-zero share
+                        shares[fac_name] = share
+
+                self.injection_shares_by_year[year] = shares
+
+            logger.info(
+                f"Built injection shares for {len(self.injection_df)} facilities "
+                f"across years: {sorted(self.injection_shares_by_year.keys())}"
+            )
+
+        elif 'absolute_share' in self.injection_df.columns:
+            # Legacy format - use same shares for all years
+            self.injection_shares_by_year = {}
+            shares = {}
+
+            for _, row in self.injection_df.iterrows():
+                fac_name = str(row["facility_name"]).strip()
+                share = float(row["absolute_share"])
+                if share > 0:
+                    shares[fac_name] = share
+
+            # Apply same shares to all available years (from facility_year_cols)
+            for year in self.available_years:
+                self.injection_shares_by_year[year] = shares.copy()
+
+            logger.info(
+                f"Built injection shares for {len(shares)} facilities "
+                f"(legacy format applied to years: {self.available_years})"
+            )
+        else:
+            raise ValueError(
+                "injection_distribution sheet must have either 'absolute_share' or 'share_YYYY' columns"
+            )
+
+    def _get_injection_shares(self, year: int) -> dict[str, float]:
+        """Get injection shares for a specific year."""
+        if year not in self.injection_shares_by_year:
+            raise ValueError(
+                f"No injection distribution found for year {year}. "
+                f"Available years: {sorted(self.injection_shares_by_year.keys())}"
+            )
+        return self.injection_shares_by_year[year]
 
     def _get_demand_params(self, year: int, day_type: str) -> dict:
         """Get demand parameters for year/day_type."""
@@ -293,10 +337,12 @@ class DemandBuilder:
                     day_type=day_type
                 ))
 
-        # 3. MIDDLE MILE: Origin = per injection_distribution, Dest = per population
+        # 3. MIDDLE MILE: Origin = per injection_distribution (year-specific), Dest = per population
         mm_daily = daily_pkgs * params['mm_share']
         if mm_daily > 0:
-            for origin, inj_share in self.injection_shares.items():
+            injection_shares = self._get_injection_shares(year)
+
+            for origin, inj_share in injection_shares.items():
                 if inj_share < 0.0001:
                     continue
                 if origin not in self.facilities:
