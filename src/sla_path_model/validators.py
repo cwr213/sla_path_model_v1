@@ -4,7 +4,7 @@ Input validation functions.
 from collections import defaultdict
 from typing import Optional
 
-from .config import Facility, FacilityType, MileageBand, ServiceCommitment, TimingParams
+from .config import Facility, FacilityType, MileageBand, ServiceCommitment, TimingParams, DemandSource
 from .utils import setup_logging
 
 logger = setup_logging()
@@ -35,6 +35,8 @@ class InputValidator:
         self.validate_scenarios()
         self.validate_service_commitments()
         self.validate_zips_facility_references()
+        self.validate_facility_markets()  # NEW
+        self.validate_market_demand()      # NEW
 
         return self.errors, self.warnings
 
@@ -279,12 +281,7 @@ class InputValidator:
             scenario_id = row.get("scenario_id", "unknown")
             year = row["year"]
             day_type = str(row["day_type"]).lower().strip()
-
-            if year not in valid_years:
-                self.errors.append(
-                    f"Scenario '{scenario_id}' references year {year} not in demand sheet. "
-                    f"Valid years: {sorted(valid_years)}"
-                )
+            demand_source = str(row.get("demand_source", "population")).lower().strip()
 
             if day_type not in valid_day_types:
                 self.errors.append(
@@ -292,11 +289,25 @@ class InputValidator:
                     f"Must be one of {valid_day_types}"
                 )
 
-            if year not in facility_years:
-                self.errors.append(
-                    f"Scenario '{scenario_id}' uses year {year} but no facility_{year} column in zips. "
-                    f"Available years: {sorted(facility_years)}"
-                )
+            # Validation depends on demand source
+            if demand_source == DemandSource.POPULATION.value:
+                # Population-based scenarios need demand sheet and facility_YYYY column
+                if year not in valid_years:
+                    self.errors.append(
+                        f"Scenario '{scenario_id}' (demand_source=population) references year {year} "
+                        f"not in demand sheet. Valid years: {sorted(valid_years)}"
+                    )
+
+                if year not in facility_years:
+                    self.errors.append(
+                        f"Scenario '{scenario_id}' (demand_source=population) uses year {year} "
+                        f"but no facility_{year} column in zips. Available years: {sorted(facility_years)}"
+                    )
+
+            elif demand_source == DemandSource.MARKET.value:
+                # Market-based scenarios need market_demand sheet with matching year/day_type
+                # (validated in validate_market_demand)
+                pass
 
     def validate_service_commitments(self):
         """Validate service commitments have valid structure."""
@@ -347,6 +358,112 @@ class InputValidator:
 
         for col, fac_name in unknown_facilities:
             self.errors.append(f"Zips sheet {col} references unknown facility: {fac_name}")
+
+    def validate_facility_markets(self):
+        """
+        Validate facility market assignments.
+
+        Rules:
+        1. Each market should be assigned to exactly one facility (1:1 relationship)
+        2. If market_demand sheet exists, all facilities should have market assignments
+        """
+        facilities: dict[str, Facility] = self.data["facilities"]
+        market_demand = self.data.get("market_demand")
+
+        # Build market -> facilities mapping to detect duplicates
+        market_to_facilities = defaultdict(list)
+        facilities_without_market = []
+
+        for name, fac in facilities.items():
+            if fac.market:
+                market_to_facilities[fac.market].append(name)
+            else:
+                facilities_without_market.append(name)
+
+        # Check for duplicate market assignments (same market used by multiple facilities)
+        for market, fac_list in market_to_facilities.items():
+            if len(fac_list) > 1:
+                self.errors.append(
+                    f"Market '{market}' is assigned to multiple facilities: {fac_list}. "
+                    f"Each market must be assigned to exactly one facility."
+                )
+
+        # If market_demand exists, check that facilities have markets
+        if market_demand is not None:
+            if facilities_without_market:
+                self.warnings.append(
+                    f"{len(facilities_without_market)} facilities missing market assignment "
+                    f"(needed for market_demand lookups): "
+                    f"{facilities_without_market[:5]}{'...' if len(facilities_without_market) > 5 else ''}"
+                )
+
+    def validate_market_demand(self):
+        """
+        Validate market_demand sheet if present.
+
+        Rules:
+        1. All markets in market_demand must map to facilities
+        2. No duplicate entries (same origin_market/dest_market/year/day_type)
+        3. Scenarios using demand_source='market' must have data in market_demand
+        """
+        market_demand = self.data.get("market_demand")
+        if market_demand is None:
+            # Check if any scenarios require market_demand
+            scenarios = self.data["scenarios"]
+            market_scenarios = scenarios[scenarios['demand_source'] == DemandSource.MARKET.value]
+            if not market_scenarios.empty:
+                scenario_ids = market_scenarios['scenario_id'].tolist()
+                self.errors.append(
+                    f"Scenarios {scenario_ids} use demand_source='market' but no market_demand sheet found"
+                )
+            return
+
+        facilities: dict[str, Facility] = self.data["facilities"]
+
+        # Build market -> facility mapping
+        market_to_fac = {fac.market: name for name, fac in facilities.items() if fac.market}
+
+        # Check all markets in market_demand are mapped to facilities
+        all_origin_markets = set(market_demand['origin_market'].unique())
+        all_dest_markets = set(market_demand['dest_market'].unique())
+        all_markets = all_origin_markets | all_dest_markets
+
+        unmapped_markets = all_markets - set(market_to_fac.keys())
+        if unmapped_markets:
+            self.errors.append(
+                f"market_demand contains {len(unmapped_markets)} markets not mapped to facilities: "
+                f"{sorted(list(unmapped_markets))[:10]}{'...' if len(unmapped_markets) > 10 else ''}"
+            )
+
+        # Check for duplicate entries
+        dupes = market_demand.groupby(
+            ['origin_market', 'dest_market', 'year', 'day_type']
+        ).size()
+        dupes = dupes[dupes > 1]
+        if len(dupes) > 0:
+            self.errors.append(
+                f"market_demand has {len(dupes)} duplicate entries "
+                f"(same origin_market/dest_market/year/day_type)"
+            )
+
+        # Check scenarios using demand_source='market' have data
+        scenarios = self.data["scenarios"]
+        market_scenarios = scenarios[scenarios['demand_source'] == DemandSource.MARKET.value]
+
+        for _, scenario in market_scenarios.iterrows():
+            scenario_id = scenario['scenario_id']
+            year = scenario['year']
+            day_type = str(scenario['day_type']).lower().strip()
+
+            mask = (
+                (market_demand['year'] == year) &
+                (market_demand['day_type'].str.lower() == day_type)
+            )
+            if not mask.any():
+                self.errors.append(
+                    f"Scenario '{scenario_id}' uses demand_source='market' "
+                    f"but no market_demand data for year={year}, day_type={day_type}"
+                )
 
 
 def validate_inputs(data: dict) -> None:

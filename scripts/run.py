@@ -10,8 +10,6 @@ Usage:
 Output naming:
     - If --output is specified, uses that path
     - Otherwise, derives name from scenario_id(s) in input file
-      e.g., "scenario_2025_peak" -> "outputs/scenario_2025_peak.xlsx"
-      e.g., multiple scenarios -> "outputs/scenario_2025_offpeak_scenario_2025_peak.xlsx"
 """
 import argparse
 import sys
@@ -34,31 +32,17 @@ from sla_path_model.utils import setup_logging
 
 
 def derive_output_filename(scenarios_df, output_dir: str = "outputs") -> str:
-    """
-    Derive output filename from scenario_id(s) in the scenarios dataframe.
-
-    Args:
-        scenarios_df: DataFrame with scenario_id column
-        output_dir: Directory for output files
-
-    Returns:
-        Output file path like "outputs/scenario_2025_peak.xlsx"
-    """
     scenario_ids = scenarios_df["scenario_id"].astype(str).unique().tolist()
 
     if len(scenario_ids) == 1:
-        # Single scenario - use its ID directly
         filename = f"{scenario_ids[0]}.xlsx"
     else:
-        # Multiple scenarios - combine IDs (limit to avoid very long names)
         if len(scenario_ids) <= 3:
             combined = "_".join(scenario_ids)
         else:
-            # Too many - use first two plus count
             combined = f"{scenario_ids[0]}_{scenario_ids[1]}_and_{len(scenario_ids)-2}_more"
         filename = f"{combined}.xlsx"
 
-    # Clean up filename (remove invalid characters)
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         filename = filename.replace(char, '_')
@@ -77,7 +61,7 @@ def main():
     )
     parser.add_argument(
         "--output", "-o",
-        default=None,  # Changed to None - will derive from scenario_id if not specified
+        default=None,
         help="Output Excel file (default: derived from scenario_id)"
     )
     parser.add_argument(
@@ -93,7 +77,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Setup logging
     import logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logger = setup_logging(log_level)
@@ -104,12 +87,10 @@ def main():
     logger.info("=" * 60)
 
     try:
-        # Step 1: Load inputs
         logger.info("Step 1: Loading inputs...")
         loader = InputLoader(args.input)
         data = loader.load_all()
 
-        # Determine output filename
         if args.output:
             output_path = args.output
         else:
@@ -117,23 +98,18 @@ def main():
 
         logger.info(f"Output will be written to: {output_path}")
 
-        # Step 2: Validate inputs
         logger.info("Step 2: Validating inputs...")
         validate_inputs(data)
 
-        # Step 3: Build OD demand
         logger.info("Step 3: Building OD demand...")
         od_demands = build_od_demand(data)
 
-        # Step 4: Enumerate paths
         logger.info("Step 4: Enumerating paths...")
         od_paths = enumerate_all_paths(data, od_demands)
 
-        # Step 5: Calculate path timings
         logger.info("Step 5: Calculating path timings...")
         od_timings = calculate_all_path_timings(data, od_paths)
 
-        # Step 6: Check feasibility
         logger.info("Step 6: Checking SLA feasibility...")
         od_timings = check_all_feasibility(
             od_timings,
@@ -141,7 +117,6 @@ def main():
             data["service_commitments"]
         )
 
-        # Step 7: Build reports (with top N filtering from run_settings)
         logger.info("Step 7: Building reports...")
         run_settings = data["run_settings"]
         reports = build_all_reports(
@@ -150,7 +125,6 @@ def main():
             top_paths_per_sort_level=run_settings.top_paths_per_sort_level
         )
 
-        # Step 8: Write outputs
         logger.info("Step 8: Writing outputs...")
         write_outputs(reports, output_path)
 
@@ -160,7 +134,6 @@ def main():
         logger.info(f"Output written to: {output_path}")
         logger.info("=" * 60)
 
-        # Print summary
         if "summary" in reports:
             summary = reports["summary"]
             for _, row in summary.iterrows():

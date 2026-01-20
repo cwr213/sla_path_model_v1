@@ -1,12 +1,13 @@
 from datetime import datetime, time
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from .config import (
     Facility, FacilityType, MileageBand, ServiceCommitment, TimingParams,
-    RunSettings, ObjectiveType, CPT
+    RunSettings, ObjectiveType, CPT, DemandSource
 )
 from .utils import parse_time_value, parse_days_of_week, setup_logging
 
@@ -51,12 +52,16 @@ class InputLoader:
             except Exception as e:
                 raise ValueError(f"Invalid timezone '{row['timezone']}' for facility {name}: {e}")
 
+            # Get market (used for commercial forecast mapping)
+            market = str(row["market"]).strip() if pd.notna(row.get("market")) else None
+
             facility = Facility(
                 name=name,
                 facility_type=FacilityType(str(row["type"]).lower().strip()),
                 lat=float(row["lat"]),
                 lon=float(row["lon"]),
                 timezone=tz,
+                market=market,
                 regional_sort_hub=str(row["regional_sort_hub"]).strip() if pd.notna(
                     row.get("regional_sort_hub")) else None,
                 mm_sort_start_local=parse_time_value(row.get("mm_sort_start_local")),
@@ -176,6 +181,45 @@ class InputLoader:
 
         return df
 
+    def load_market_demand(self) -> Optional[pd.DataFrame]:
+        """
+        Load market_demand sheet if present (commercial forecast).
+
+        Expected format:
+        | origin_market | dest_market | year | day_type | pkgs_day |
+
+        Returns None if sheet doesn't exist.
+        """
+        if "market_demand" not in self.excel.sheet_names:
+            logger.info("No market_demand sheet found, will use population-based demand for 'population' scenarios")
+            return None
+
+        df = pd.read_excel(self.excel, sheet_name="market_demand")
+
+        required_cols = ['origin_market', 'dest_market', 'year', 'day_type', 'pkgs_day']
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"market_demand sheet missing required columns: {missing}")
+
+        # Normalize day_type to lowercase
+        df['day_type'] = df['day_type'].str.lower().str.strip()
+
+        # Validate day_type values
+        valid_day_types = {'offpeak', 'peak'}
+        invalid_day_types = set(df['day_type'].unique()) - valid_day_types
+        if invalid_day_types:
+            raise ValueError(
+                f"market_demand sheet has invalid day_type values: {invalid_day_types}. "
+                f"Must be one of {valid_day_types}"
+            )
+
+        logger.info(
+            f"Loaded market_demand with {len(df)} records "
+            f"(years: {sorted(df['year'].unique())}, "
+            f"day_types: {sorted(df['day_type'].unique())})"
+        )
+        return df
+
     def load_scenarios(self) -> pd.DataFrame:
         df = pd.read_excel(self.excel, sheet_name="scenarios")
 
@@ -184,6 +228,22 @@ class InputLoader:
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             raise ValueError(f"Scenarios sheet missing required columns: {missing}")
+
+        # Add default demand_source if not present (backward compatible)
+        if 'demand_source' not in df.columns:
+            df['demand_source'] = 'population'
+            logger.info("No demand_source column in scenarios - defaulting to 'population'")
+
+        # Normalize and validate demand_source values
+        df['demand_source'] = df['demand_source'].fillna('population').str.lower().str.strip()
+
+        valid_sources = {ds.value for ds in DemandSource}
+        invalid_sources = set(df['demand_source'].unique()) - valid_sources
+        if invalid_sources:
+            raise ValueError(
+                f"Scenarios sheet has invalid demand_source values: {invalid_sources}. "
+                f"Must be one of {valid_sources}"
+            )
 
         logger.info(f"Loaded {len(df)} scenarios")
         return df
@@ -364,5 +424,6 @@ class InputLoader:
             "timing_params": self.load_timing_params(),
             "arc_cpts": self.load_arc_cpts(facilities),
             "service_commitments": self.load_service_commitments(),
-            "run_settings": self.load_run_settings()
+            "run_settings": self.load_run_settings(),
+            "market_demand": self.load_market_demand(),  # NEW - optional commercial forecast
         }

@@ -42,6 +42,12 @@ class FlowType(str, Enum):
     MIDDLE_MILE = "middle_mile"
 
 
+class DemandSource(str, Enum):
+    """Source of demand data for a scenario."""
+    POPULATION = "population"  # Population-based synthetic demand (DI/ZS/MM splits)
+    MARKET = "market"          # Commercial forecast at market-to-market level
+
+
 class ObjectiveType(str, Enum):
     MAXIMIZE_VOLUME_AT_SLA = "maximize_volume_at_sla"
     WEIGHTED_SLA = "weighted_sla"
@@ -132,6 +138,7 @@ class Facility:
     lat: float
     lon: float
     timezone: ZoneInfo
+    market: Optional[str]  # Market name for commercial forecast mapping
     regional_sort_hub: Optional[str]
 
     mm_sort_start_local: Optional[time]
