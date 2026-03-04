@@ -62,7 +62,7 @@ def format_window(start_local, end_local) -> str:
 def print_summary_table(timings: list[PathTimingResult], facilities: dict[str, Facility]):
     """Print compact summary table of all paths."""
     print()
-    print(f"  #  Path Type         Sort Lvl    Dest Sort   Nodes                                TIT(hrs)  SLA     Slack")
+    print(f"  #  Path Type         Sort Lvl    Dest Sort   Nodes                                TNT(hrs)  SLA     Slack")
     print(f"  -  ---------         --------    ---------   -----                                --------  ---     -----")
 
     for i, timing in enumerate(timings, 1):
@@ -75,7 +75,7 @@ def print_summary_table(timings: list[PathTimingResult], facilities: dict[str, F
         slack_sign = "+" if timing.sla_slack_hours >= 0 else ""
 
         print(f"  {i:<2} {path.path_type.value:<17} {path.sort_level.value:<11} {path.dest_sort_level.value:<11} "
-              f"{nodes_str:<36} {timing.tit_hours:>6.1f}    {sla_status:<6}  {slack_sign}{timing.sla_slack_hours:.1f}")
+              f"{nodes_str:<36} {timing.tnt_hours:>6.1f}    {sla_status:<6}  {slack_sign}{timing.sla_slack_hours:.1f}")
 
 
 def print_detailed_breakdown(timing: PathTimingResult, facilities: dict[str, Facility], path_num: int):
@@ -197,7 +197,7 @@ def print_detailed_breakdown(timing: PathTimingResult, facilities: dict[str, Fac
     total_dwell_hrs = window_dwell_hrs + cpt_dwell_hrs
 
     print(f"Summary: Sort={sort_hrs:.1f}h, Crossdock={crossdock_hrs:.1f}h, Transit={transit_hrs:.1f}h, "
-          f"Dwell={total_dwell_hrs:.1f}h (win:{window_dwell_hrs:.1f}, cpt:{cpt_dwell_hrs:.1f}) → TIT={timing.tit_hours:.1f}h")
+          f"Dwell={total_dwell_hrs:.1f}h (win:{window_dwell_hrs:.1f}, cpt:{cpt_dwell_hrs:.1f}) → TNT={timing.tnt_hours:.1f}h")
 
     sla_status = "MET" if timing.sla_met else "MISS"
     slack_sign = "+" if timing.sla_slack_hours >= 0 else ""
@@ -345,8 +345,8 @@ def main():
 
     timings = updated_timings
 
-    # Sort by TIT
-    timings.sort(key=lambda t: (t.tit_hours, len(t.path.path_nodes), t.path.total_path_miles))
+    # Sort by TNT
+    timings.sort(key=lambda t: (t.tnt_hours, len(t.path.path_nodes), t.path.total_path_miles))
 
     # Print summary
     print()

@@ -12,10 +12,10 @@ logger = setup_logging()
 def _path_ranking_key(timing: PathTimingResult) -> tuple:
     """
     Ranking key for selecting optimal path.
-    Priority: shortest TIT, fewest touches, shortest miles.
+    Priority: shortest TNT, fewest touches, shortest miles.
     """
     num_touches = len(timing.path.path_nodes) - 1
-    return (timing.tit_hours, num_touches, timing.path.total_path_miles)
+    return (timing.tnt_hours, num_touches, timing.path.total_path_miles)
 
 
 def filter_top_paths_per_sort_level(
@@ -97,20 +97,84 @@ class ReportBuilder:
         ]
 
     def build_od_demand_df(self) -> pd.DataFrame:
+        """
+        Build od_demand sheet with demand data enriched with SLA diagnostic columns.
+
+        For each OD demand row, adds fastest TNT and meets-SLA flag broken down by:
+        - Sort level: region, market, sort_group
+        - Touch level: 2-touch through 5-touch
+
+        DI demand rows get N/A for all diagnostic columns (no networked paths apply).
+        """
+        # Map PathType to touch count for grouping
+        touch_count_map = {
+            PathType.TWO_TOUCH: 2,
+            PathType.THREE_TOUCH: 3,
+            PathType.FOUR_TOUCH: 4,
+            PathType.FIVE_TOUCH: 5,
+        }
+
         rows = []
         for demand in self.od_demands:
-            rows.append({
+            row = {
                 "scenario_id": demand.scenario_id,
                 "origin": demand.origin,
                 "dest": demand.dest,
                 "pkgs_day": demand.pkgs_day,
                 "zone": demand.zone,
                 "flow_type": demand.flow_type.value,
-                "week_number": demand.week_number
-            })
+                "week_number": demand.week_number,
+            }
+
+            # DI demand rows: all diagnostic columns = N/A
+            if demand.flow_type == FlowType.DIRECT_INJECTION:
+                for sl in ("region", "market", "sort_group"):
+                    row[f"fastest_{sl}_tnt"] = "N/A"
+                    row[f"{sl}_meets_sla"] = "N/A"
+                for tc in (2, 3, 4, 5):
+                    row[f"fastest_{tc}_touch_tnt"] = "N/A"
+                    row[f"{tc}_touch_meets_sla"] = "N/A"
+            else:
+                # Look up timings for this OD pair, filtered by scenario
+                timings = self.od_timings.get((demand.origin, demand.dest), [])
+                timings = self._filter_timings_for_scenario(timings, demand.scenario_id)
+
+                # Exclude DI and OD_MM paths (placeholder sort levels, no touch hierarchy)
+                networked = [
+                    t for t in timings
+                    if t.path.path_type not in (PathType.DIRECT_INJECTION, PathType.OD_MM)
+                ]
+
+                # Sort level breakdown: fastest path per sort_level
+                for sl_enum, sl_name in [
+                    (SortLevel.REGION, "region"),
+                    (SortLevel.MARKET, "market"),
+                    (SortLevel.SORT_GROUP, "sort_group"),
+                ]:
+                    level_paths = [t for t in networked if t.path.sort_level == sl_enum]
+                    if level_paths:
+                        best = min(level_paths, key=lambda t: t.tnt_hours)
+                        row[f"fastest_{sl_name}_tnt"] = round(best.tnt_hours, 2)
+                        row[f"{sl_name}_meets_sla"] = best.sla_met
+                    else:
+                        row[f"fastest_{sl_name}_tnt"] = "N/A"
+                        row[f"{sl_name}_meets_sla"] = "N/A"
+
+                # Touch count breakdown: fastest path per touch level
+                for pt, tc in touch_count_map.items():
+                    touch_paths = [t for t in networked if t.path.path_type == pt]
+                    if touch_paths:
+                        best = min(touch_paths, key=lambda t: t.tnt_hours)
+                        row[f"fastest_{tc}_touch_tnt"] = round(best.tnt_hours, 2)
+                        row[f"{tc}_touch_meets_sla"] = best.sla_met
+                    else:
+                        row[f"fastest_{tc}_touch_tnt"] = "N/A"
+                        row[f"{tc}_touch_meets_sla"] = "N/A"
+
+            rows.append(row)
 
         df = pd.DataFrame(rows)
-        logger.info(f"Built od_demand with {len(df)} rows")
+        logger.info(f"Built od_demand with {len(df)} rows, {len(df.columns)} columns")
         return df
 
     def build_feasible_paths_df(self) -> pd.DataFrame:
@@ -127,11 +191,11 @@ class ReportBuilder:
         - zone_mm_zs: Zone for middle mile / zone skip (mileage band based)
         - zone_di: Zone for direct injection (always 0)
 
-        TIT breakdown columns:
-        - tit_sort_hours: Induction + full sort + last mile sort time
-        - tit_crossdock_hours: Crossdock processing time
-        - tit_transit_hours: Linehaul transit time
-        - tit_dwell_hours: CPT dwell + sort window dwell time
+        TNT breakdown columns:
+        - tnt_sort_hours: Induction + full sort + last mile sort time
+        - tnt_crossdock_hours: Crossdock processing time
+        - tnt_transit_hours: Linehaul transit time
+        - tnt_dwell_hours: CPT dwell + sort window dwell time
         """
         rows = []
 
@@ -209,19 +273,19 @@ class ReportBuilder:
                     if path_pkgs_day < 0.01:
                         continue
 
-                    # Calculate TIT breakdown from steps
-                    tit_sort_mins = 0.0
-                    tit_crossdock_mins = 0.0
-                    tit_transit_mins = 0.0
+                    # Calculate TNT breakdown from steps
+                    tnt_sort_mins = 0.0
+                    tnt_crossdock_mins = 0.0
+                    tnt_transit_mins = 0.0
 
                     for step in timing.steps:
                         if step.step_type in (StepType.INDUCTION_SORT, StepType.FULL_SORT,
                                               StepType.SORT_GROUP_SORT, StepType.ROUTE_SORT):
-                            tit_sort_mins += step.duration_minutes
+                            tnt_sort_mins += step.duration_minutes
                         elif step.step_type == StepType.CROSSDOCK:
-                            tit_crossdock_mins += step.duration_minutes
+                            tnt_crossdock_mins += step.duration_minutes
                         elif step.step_type == StepType.TRANSIT:
-                            tit_transit_mins += step.duration_minutes
+                            tnt_transit_mins += step.duration_minutes
 
                     rows.append({
                         "scenario_id": scenario_id,
@@ -238,11 +302,11 @@ class ReportBuilder:
                         "total_path_miles": round(timing.path.total_path_miles, 1),
                         "direct_miles": round(timing.path.direct_miles, 1),
                         "atw_factor": round(timing.path.atw_factor, 3),
-                        "tit_hours": round(timing.tit_hours, 2),
-                        "tit_sort_hours": round(tit_sort_mins / 60, 2),
-                        "tit_crossdock_hours": round(tit_crossdock_mins / 60, 2),
-                        "tit_transit_hours": round(tit_transit_mins / 60, 2),
-                        "tit_dwell_hours": round(timing.total_dwell_hours, 2),
+                        "tnt_hours": round(timing.tnt_hours, 2),
+                        "tnt_sort_hours": round(tnt_sort_mins / 60, 2),
+                        "tnt_crossdock_hours": round(tnt_crossdock_mins / 60, 2),
+                        "tnt_transit_hours": round(tnt_transit_mins / 60, 2),
+                        "tnt_dwell_hours": round(timing.total_dwell_hours, 2),
                         "sla_days": timing.sla_days,
                         "sla_target_hours": round(timing.sla_target_hours, 2),
                         "sla_met": timing.sla_met,
@@ -274,8 +338,8 @@ class ReportBuilder:
             paths_feasible = 0
             volume_at_sla = 0
             volume_missed = 0
-            tit_sum = 0
-            tit_count = 0
+            tnt_sum = 0
+            tnt_count = 0
 
             for demand in scenario_demands:
                 if demand.flow_type == FlowType.DIRECT_INJECTION:
@@ -293,13 +357,13 @@ class ReportBuilder:
                 if feasible_for_od:
                     volume_at_sla += demand.pkgs_day
                     best = min(feasible_for_od, key=_path_ranking_key)
-                    tit_sum += best.tit_hours
-                    tit_count += 1
+                    tnt_sum += best.tnt_hours
+                    tnt_count += 1
                 elif timings:
                     volume_missed += demand.pkgs_day
                     best = min(timings, key=_path_ranking_key)
-                    tit_sum += best.tit_hours
-                    tit_count += 1
+                    tnt_sum += best.tnt_hours
+                    tnt_count += 1
 
             rows.append({
                 "scenario_id": scenario_id,
@@ -309,7 +373,7 @@ class ReportBuilder:
                 "paths_feasible": paths_feasible,
                 "pct_volume_at_sla": round(volume_at_sla / total_packages, 4) if total_packages > 0 else 0,
                 "pct_volume_missed": round(volume_missed / total_packages, 4) if total_packages > 0 else 0,
-                "avg_tit_hours": round(tit_sum / tit_count, 2) if tit_count > 0 else 0
+                "avg_tnt_hours": round(tnt_sum / tnt_count, 2) if tnt_count > 0 else 0
             })
 
         df = pd.DataFrame(rows)
@@ -349,19 +413,19 @@ class ReportBuilder:
                 best = min(matching, key=_path_ranking_key)
 
                 if not best.sla_met:
-                    # Calculate TIT breakdown
-                    tit_sort_mins = 0.0
-                    tit_crossdock_mins = 0.0
-                    tit_transit_mins = 0.0
+                    # Calculate TNT breakdown
+                    tnt_sort_mins = 0.0
+                    tnt_crossdock_mins = 0.0
+                    tnt_transit_mins = 0.0
 
                     for step in best.steps:
                         if step.step_type in (StepType.INDUCTION_SORT, StepType.FULL_SORT,
                                               StepType.SORT_GROUP_SORT, StepType.ROUTE_SORT):
-                            tit_sort_mins += step.duration_minutes
+                            tnt_sort_mins += step.duration_minutes
                         elif step.step_type == StepType.CROSSDOCK:
-                            tit_crossdock_mins += step.duration_minutes
+                            tnt_crossdock_mins += step.duration_minutes
                         elif step.step_type == StepType.TRANSIT:
-                            tit_transit_mins += step.duration_minutes
+                            tnt_transit_mins += step.duration_minutes
 
                     rows.append({
                         "scenario_id": scenario_id,
@@ -373,11 +437,11 @@ class ReportBuilder:
                         "pkgs_day": round(demand.pkgs_day, 0),
                         "sla_days": best.sla_days,
                         "sla_target_hours": round(best.sla_target_hours, 2),
-                        "best_tit_hours": round(best.tit_hours, 2),
-                        "tit_sort_hours": round(tit_sort_mins / 60, 2),
-                        "tit_crossdock_hours": round(tit_crossdock_mins / 60, 2),
-                        "tit_transit_hours": round(tit_transit_mins / 60, 2),
-                        "tit_dwell_hours": round(best.total_dwell_hours, 2),
+                        "best_tnt_hours": round(best.tnt_hours, 2),
+                        "tnt_sort_hours": round(tnt_sort_mins / 60, 2),
+                        "tnt_crossdock_hours": round(tnt_crossdock_mins / 60, 2),
+                        "tnt_transit_hours": round(tnt_transit_mins / 60, 2),
+                        "tnt_dwell_hours": round(best.total_dwell_hours, 2),
                         "miss_hours": round(-best.sla_slack_hours, 2)
                     })
 

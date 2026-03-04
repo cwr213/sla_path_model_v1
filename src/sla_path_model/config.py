@@ -247,7 +247,7 @@ class PathCandidate:
 @dataclass
 class PathTimingResult:
     path: PathCandidate
-    tit_hours: float
+    tnt_hours: float
     sort_window_dwell_hours: float
     cpt_dwell_hours: float
     total_dwell_hours: float

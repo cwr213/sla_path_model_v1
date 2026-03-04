@@ -10,8 +10,8 @@ Algorithm:
    - Add intermediate processing (crossdock or full sort)
    - Repeat for each hop
    - Add LM sort time at destination (if dest_sort_level = MARKET)
-3. Result: arrival time and total TIT from fixed injection
-4. sla_slack_hours = SLA target - TIT (positive = meets SLA, negative = misses)
+3. Result: arrival time and total TNT from fixed injection
+4. sla_slack_hours = SLA target - TNT (positive = meets SLA, negative = misses)
 """
 from datetime import datetime, timedelta, time
 from typing import Optional
@@ -49,7 +49,7 @@ class TimingEngine:
 
     def calculate_path_timing(self, path: PathCandidate) -> PathTimingResult:
         """
-        Calculate TIT using forward-chaining from fixed injection time.
+        Calculate TNT using forward-chaining from fixed injection time.
 
         Sort logic:
         - DI at Launch: sort_group_sort + route_sort (no induction)
@@ -304,12 +304,12 @@ class TimingEngine:
 
         # Calculate results
         arrival_time_utc = current_time_utc
-        tit_hours = (arrival_time_utc - injection_utc).total_seconds() / 3600
+        tnt_hours = (arrival_time_utc - injection_utc).total_seconds() / 3600
         total_dwell_hours = (total_sort_window_dwell + total_cpt_dwell) / MINUTES_PER_HOUR
 
         return PathTimingResult(
             path=path,
-            tit_hours=tit_hours,
+            tnt_hours=tnt_hours,
             sort_window_dwell_hours=total_sort_window_dwell / MINUTES_PER_HOUR,
             cpt_dwell_hours=total_cpt_dwell / MINUTES_PER_HOUR,
             total_dwell_hours=total_dwell_hours,

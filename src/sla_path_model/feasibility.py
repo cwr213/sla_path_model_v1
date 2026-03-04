@@ -123,8 +123,8 @@ class FeasibilityChecker:
         sla_target_hours = (commitment.sla_days + commitment.sla_buffer_days) * HOURS_PER_DAY
 
         # Check if path meets SLA
-        sla_met = timing.tit_hours <= sla_target_hours
-        sla_slack_hours = sla_target_hours - timing.tit_hours
+        sla_met = timing.tnt_hours <= sla_target_hours
+        sla_slack_hours = sla_target_hours - timing.tnt_hours
 
         # Update timing result
         timing.sla_days = commitment.sla_days
