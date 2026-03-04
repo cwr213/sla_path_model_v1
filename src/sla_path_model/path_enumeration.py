@@ -371,6 +371,40 @@ class PathEnumerator:
                         atw_factor=atw_factor
                     ))
 
+            # Case 2: Destination IS an RSH (self-referencing or serves others)
+            # Example: ATL02 → PHL01 (where PHL01.regional_sort_hub = PHL01)
+            # PHL01 can handle region-level breakdown for itself
+            dest_is_rsh = dest in self.regional_hub_to_facilities
+
+            if dest_is_rsh:
+                # Destination can handle region-level breakdown for itself
+                if is_direct:
+                    # Direct path to RSH: dest does region→sort_group + last mile
+                    candidates.append(PathCandidate(
+                        origin=origin,
+                        dest=dest,
+                        path_nodes=path_nodes,
+                        path_type=path_type,
+                        sort_level=SortLevel.REGION,
+                        dest_sort_level=SortLevel.MARKET,
+                        total_path_miles=total_miles,
+                        direct_miles=direct_miles,
+                        atw_factor=atw_factor
+                    ))
+                else:
+                    # Multi-hop to RSH destination: dest does full sort + last mile
+                    candidates.append(PathCandidate(
+                        origin=origin,
+                        dest=dest,
+                        path_nodes=path_nodes,
+                        path_type=path_type,
+                        sort_level=SortLevel.REGION,
+                        dest_sort_level=SortLevel.MARKET,
+                        total_path_miles=total_miles,
+                        direct_miles=direct_miles,
+                        atw_factor=atw_factor
+                    ))
+
         return candidates
 
 
