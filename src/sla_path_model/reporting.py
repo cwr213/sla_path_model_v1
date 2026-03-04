@@ -3,7 +3,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from .config import PathTimingResult, ODDemand, FlowType, SortLevel, StepType, PathType
+from .config import PathTimingResult, ODDemand, FlowType, SortLevel, StepType, PathType, ALL_SORT_LEVELS
 from .utils import setup_logging
 
 logger = setup_logging()
@@ -70,10 +70,31 @@ class ReportBuilder:
     def __init__(
             self,
             od_demands: list[ODDemand],
-            od_timings: dict[tuple[str, str], list[PathTimingResult]]
+            od_timings: dict[tuple[str, str], list[PathTimingResult]],
+            scenario_sort_levels: dict[str, frozenset] = None
     ):
         self.od_demands = od_demands
         self.od_timings = od_timings
+        self.scenario_sort_levels = scenario_sort_levels or {}
+
+    def _filter_timings_for_scenario(
+            self,
+            timings: list[PathTimingResult],
+            scenario_id: str
+    ) -> list[PathTimingResult]:
+        """Filter path timings based on a scenario's enabled sort levels.
+
+        DI and OD_MM paths always pass through (their sort_level is a placeholder).
+        """
+        enabled = self.scenario_sort_levels.get(scenario_id)
+        if enabled is None or enabled == ALL_SORT_LEVELS:
+            return timings
+
+        return [
+            t for t in timings
+            if t.path.path_type in (PathType.DIRECT_INJECTION, PathType.OD_MM)
+            or t.path.sort_level in enabled
+        ]
 
     def build_od_demand_df(self) -> pd.DataFrame:
         rows = []
@@ -85,7 +106,7 @@ class ReportBuilder:
                 "pkgs_day": demand.pkgs_day,
                 "zone": demand.zone,
                 "flow_type": demand.flow_type.value,
-                "day_type": demand.day_type
+                "week_number": demand.week_number
             })
 
         df = pd.DataFrame(rows)
@@ -146,8 +167,9 @@ class ReportBuilder:
                 zone_mm_zs = demand_info['zone_mm_zs']
                 zone_di = demand_info['zone_di']
 
-                # Get path timings for this OD
+                # Get path timings for this OD, filtered by scenario's enabled sort levels
                 timings = self.od_timings.get((origin, dest), [])
+                timings = self._filter_timings_for_scenario(timings, scenario_id)
 
                 if not timings:
                     # No paths found - skip this OD (shouldn't happen if demand exists)
@@ -262,6 +284,7 @@ class ReportBuilder:
 
                 key = (demand.origin, demand.dest)
                 timings = self.od_timings.get(key, [])
+                timings = self._filter_timings_for_scenario(timings, scenario_id)
                 paths_evaluated += len(timings)
 
                 feasible_for_od = [t for t in timings if t.sla_met]
@@ -304,6 +327,7 @@ class ReportBuilder:
             for demand in scenario_demands:
                 key = (demand.origin, demand.dest)
                 timings = self.od_timings.get(key, [])
+                timings = self._filter_timings_for_scenario(timings, scenario_id)
 
                 if not timings:
                     continue
@@ -365,7 +389,8 @@ class ReportBuilder:
 def build_all_reports(
         od_demands: list[ODDemand],
         od_timings: dict[tuple[str, str], list[PathTimingResult]],
-        top_paths_per_sort_level: int = None
+        top_paths_per_sort_level: int = None,
+        scenario_sort_levels: dict[str, frozenset] = None
 ) -> dict[str, pd.DataFrame]:
     """
     Build all report DataFrames.
@@ -374,6 +399,7 @@ def build_all_reports(
         od_demands: List of OD demand records
         od_timings: Dictionary of path timing results
         top_paths_per_sort_level: If provided, filter to top N per OD × sort_level
+        scenario_sort_levels: Mapping of scenario_id to enabled SortLevel frozensets
 
     Returns:
         Dictionary of report DataFrames
@@ -382,7 +408,7 @@ def build_all_reports(
     if top_paths_per_sort_level is not None and top_paths_per_sort_level > 0:
         od_timings = filter_top_paths_per_sort_level(od_timings, top_paths_per_sort_level)
 
-    builder = ReportBuilder(od_demands, od_timings)
+    builder = ReportBuilder(od_demands, od_timings, scenario_sort_levels=scenario_sort_levels)
 
     return {
         "summary": builder.build_summary_df(),

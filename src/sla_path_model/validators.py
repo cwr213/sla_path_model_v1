@@ -4,7 +4,10 @@ Input validation functions.
 from collections import defaultdict
 from typing import Optional
 
-from .config import Facility, FacilityType, MileageBand, ServiceCommitment, TimingParams, DemandSource
+from .config import (
+    Facility, FacilityType, MileageBand, ServiceCommitment, TimingParams,
+    DemandSource, parse_enabled_sort_levels
+)
 from .utils import setup_logging
 
 logger = setup_logging()
@@ -259,13 +262,15 @@ class InputValidator:
             self.errors.append(f"route_sort_minutes must be non-negative: {timing.route_sort_minutes}")
 
     def validate_scenarios(self):
-        """Validate scenarios reference valid years and day types."""
+        """Validate scenarios reference valid years and week numbers."""
         scenarios = self.data["scenarios"]
         demand = self.data["demand"]
         zips_df = self.data["zips"]
 
-        valid_years = set(demand["year"].unique())
-        valid_day_types = {"offpeak", "peak"}
+        # Build set of valid (year, week_number) pairs from demand sheet
+        valid_demand_keys = set(
+            zip(demand["year"].astype(int), demand["week_number"].astype(int))
+        )
 
         # Get available facility_YYYY years from zips
         facility_years = set()
@@ -279,23 +284,23 @@ class InputValidator:
 
         for _, row in scenarios.iterrows():
             scenario_id = row.get("scenario_id", "unknown")
-            year = row["year"]
-            day_type = str(row["day_type"]).lower().strip()
+            year = int(row["year"])
+            week_number = int(row["week_number"])
             demand_source = str(row.get("demand_source", "population")).lower().strip()
 
-            if day_type not in valid_day_types:
+            if not (1 <= week_number <= 52):
                 self.errors.append(
-                    f"Scenario '{scenario_id}' has invalid day_type: {day_type}. "
-                    f"Must be one of {valid_day_types}"
+                    f"Scenario '{scenario_id}' has invalid week_number: {week_number}. "
+                    f"Must be between 1 and 52"
                 )
 
             # Validation depends on demand source
             if demand_source == DemandSource.POPULATION.value:
-                # Population-based scenarios need demand sheet and facility_YYYY column
-                if year not in valid_years:
+                # Population-based scenarios need (year, week_number) in demand sheet
+                if (year, week_number) not in valid_demand_keys:
                     self.errors.append(
-                        f"Scenario '{scenario_id}' (demand_source=population) references year {year} "
-                        f"not in demand sheet. Valid years: {sorted(valid_years)}"
+                        f"Scenario '{scenario_id}' (demand_source=population) references "
+                        f"year={year}, week_number={week_number} not found in demand sheet"
                     )
 
                 if year not in facility_years:
@@ -305,9 +310,21 @@ class InputValidator:
                     )
 
             elif demand_source == DemandSource.MARKET.value:
-                # Market-based scenarios need market_demand sheet with matching year/day_type
+                # Market-based scenarios need market_demand sheet with matching year/week_number
                 # (validated in validate_market_demand)
                 pass
+
+        # Validate enabled_sort_levels if column exists
+        if 'enabled_sort_levels' in scenarios.columns:
+            for _, row in scenarios.iterrows():
+                scenario_id = row.get("scenario_id", "unknown")
+                raw_value = row.get("enabled_sort_levels")
+                if raw_value is not None and not (isinstance(raw_value, float) and raw_value != raw_value):
+                    if isinstance(raw_value, str) and raw_value.strip():
+                        try:
+                            parse_enabled_sort_levels(raw_value)
+                        except ValueError as e:
+                            self.errors.append(f"Scenario '{scenario_id}': {e}")
 
     def validate_service_commitments(self):
         """Validate service commitments have valid structure."""
@@ -403,7 +420,7 @@ class InputValidator:
 
         Rules:
         1. All markets in market_demand must map to facilities
-        2. No duplicate entries (same origin_market/dest_market/year/day_type)
+        2. No duplicate entries (same origin_market/dest_market/year/week_number)
         3. Scenarios using demand_source='market' must have data in market_demand
         """
         market_demand = self.data.get("market_demand")
@@ -437,13 +454,13 @@ class InputValidator:
 
         # Check for duplicate entries
         dupes = market_demand.groupby(
-            ['origin_market', 'dest_market', 'year', 'day_type']
+            ['origin_market', 'dest_market', 'year', 'week_number']
         ).size()
         dupes = dupes[dupes > 1]
         if len(dupes) > 0:
             self.errors.append(
                 f"market_demand has {len(dupes)} duplicate entries "
-                f"(same origin_market/dest_market/year/day_type)"
+                f"(same origin_market/dest_market/year/week_number)"
             )
 
         # Check scenarios using demand_source='market' have data
@@ -452,17 +469,17 @@ class InputValidator:
 
         for _, scenario in market_scenarios.iterrows():
             scenario_id = scenario['scenario_id']
-            year = scenario['year']
-            day_type = str(scenario['day_type']).lower().strip()
+            year = int(scenario['year'])
+            week_number = int(scenario['week_number'])
 
             mask = (
                 (market_demand['year'] == year) &
-                (market_demand['day_type'].str.lower() == day_type)
+                (market_demand['week_number'] == week_number)
             )
             if not mask.any():
                 self.errors.append(
                     f"Scenario '{scenario_id}' uses demand_source='market' "
-                    f"but no market_demand data for year={year}, day_type={day_type}"
+                    f"but no market_demand data for year={year}, week_number={week_number}"
                 )
 
 

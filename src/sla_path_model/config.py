@@ -27,6 +27,55 @@ class SortLevel(str, Enum):
     SORT_GROUP = "sort_group"
 
 
+ALL_SORT_LEVELS = frozenset({SortLevel.REGION, SortLevel.MARKET, SortLevel.SORT_GROUP})
+
+
+def parse_enabled_sort_levels(value) -> frozenset:
+    """
+    Parse a comma-separated string of sort level names into a frozenset of SortLevel.
+
+    Args:
+        value: String like "region,market" or None/NaN for all levels.
+
+    Returns:
+        frozenset of SortLevel enum values.
+
+    Raises:
+        ValueError: If any value is not a valid SortLevel.
+    """
+    if value is None:
+        return ALL_SORT_LEVELS
+
+    # Handle pandas NaN
+    try:
+        if value != value:  # NaN check
+            return ALL_SORT_LEVELS
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, str) and not value.strip():
+        return ALL_SORT_LEVELS
+
+    levels = set()
+    for part in str(value).split(","):
+        part = part.strip().lower()
+        if not part:
+            continue
+        try:
+            levels.add(SortLevel(part))
+        except ValueError:
+            valid = [sl.value for sl in SortLevel]
+            raise ValueError(
+                f"Invalid sort level '{part}' in enabled_sort_levels. "
+                f"Must be one of {valid}"
+            )
+
+    if not levels:
+        return ALL_SORT_LEVELS
+
+    return frozenset(levels)
+
+
 class PathType(str, Enum):
     TWO_TOUCH = "2_touch"      # A → B (origin + dest = 2 facilities)
     THREE_TOUCH = "3_touch"    # A → H → B (3 facilities)
@@ -251,7 +300,7 @@ class ODDemand:
     pkgs_day: float
     zone: int
     flow_type: FlowType
-    day_type: str
+    week_number: int
 
 
 def time_to_minutes(t: time) -> float:

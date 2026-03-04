@@ -7,7 +7,7 @@ import pandas as pd
 
 from .config import (
     Facility, FacilityType, MileageBand, ServiceCommitment, TimingParams,
-    RunSettings, ObjectiveType, CPT, DemandSource
+    RunSettings, ObjectiveType, CPT, DemandSource, parse_enabled_sort_levels
 )
 from .utils import parse_time_value, parse_days_of_week, setup_logging
 
@@ -112,29 +112,38 @@ class InputLoader:
 
     def load_demand(self) -> pd.DataFrame:
         """
-        Load demand sheet with three-flow shares.
+        Load demand sheet with per-week demand parameters.
 
         Required columns:
-        - year, annual_pkgs
-        - offpeak_pct_of_annual, peak_pct_of_annual
-        - middle_mile_share_offpeak, middle_mile_share_peak
-        - zone_skip_share_offpeak, zone_skip_share_peak
-        - direct_injection_share_offpeak, direct_injection_share_peak
+        - year, week_number, daily_pkgs
+        - mm_share, zs_share, di_share
         """
         df = pd.read_excel(self.excel, sheet_name="demand")
 
         required_cols = [
-            'year', 'annual_pkgs',
-            'offpeak_pct_of_annual', 'peak_pct_of_annual',
-            'middle_mile_share_offpeak', 'middle_mile_share_peak',
-            'zone_skip_share_offpeak', 'zone_skip_share_peak',
-            'direct_injection_share_offpeak', 'direct_injection_share_peak'
+            'year', 'week_number', 'daily_pkgs',
+            'mm_share', 'zs_share', 'di_share'
         ]
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             raise ValueError(f"Demand sheet missing required columns: {missing}")
 
-        logger.info(f"Loaded demand data for {len(df)} year(s)")
+        # Validate week_number
+        df['week_number'] = df['week_number'].astype(int)
+        invalid_weeks = df[~df['week_number'].between(1, 52)]
+        if not invalid_weeks.empty:
+            raise ValueError(
+                f"Demand sheet has week_number values outside 1-52 range: "
+                f"{sorted(invalid_weeks['week_number'].unique().tolist())}"
+            )
+
+        # Check for duplicate (year, week_number) rows
+        dupes = df.duplicated(subset=['year', 'week_number'], keep=False)
+        if dupes.any():
+            dupe_pairs = df[dupes][['year', 'week_number']].drop_duplicates().values.tolist()
+            raise ValueError(f"Demand sheet has duplicate (year, week_number) rows: {dupe_pairs}")
+
+        logger.info(f"Loaded demand data for {len(df)} year/week combinations")
         return df
 
     def load_injection_distribution(self) -> pd.DataFrame:
@@ -186,7 +195,7 @@ class InputLoader:
         Load market_demand sheet if present (commercial forecast).
 
         Expected format:
-        | origin_market | dest_market | year | day_type | pkgs_day |
+        | origin_market | dest_market | year | week_number | pkgs_day |
 
         Returns None if sheet doesn't exist.
         """
@@ -196,27 +205,24 @@ class InputLoader:
 
         df = pd.read_excel(self.excel, sheet_name="market_demand")
 
-        required_cols = ['origin_market', 'dest_market', 'year', 'day_type', 'pkgs_day']
+        required_cols = ['origin_market', 'dest_market', 'year', 'week_number', 'pkgs_day']
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             raise ValueError(f"market_demand sheet missing required columns: {missing}")
 
-        # Normalize day_type to lowercase
-        df['day_type'] = df['day_type'].str.lower().str.strip()
-
-        # Validate day_type values
-        valid_day_types = {'offpeak', 'peak'}
-        invalid_day_types = set(df['day_type'].unique()) - valid_day_types
-        if invalid_day_types:
+        # Validate week_number
+        df['week_number'] = df['week_number'].astype(int)
+        invalid_weeks = df[~df['week_number'].between(1, 52)]
+        if not invalid_weeks.empty:
             raise ValueError(
-                f"market_demand sheet has invalid day_type values: {invalid_day_types}. "
-                f"Must be one of {valid_day_types}"
+                f"market_demand sheet has week_number values outside 1-52 range: "
+                f"{sorted(invalid_weeks['week_number'].unique().tolist())}"
             )
 
         logger.info(
             f"Loaded market_demand with {len(df)} records "
             f"(years: {sorted(df['year'].unique())}, "
-            f"day_types: {sorted(df['day_type'].unique())})"
+            f"weeks: {sorted(df['week_number'].unique())})"
         )
         return df
 
@@ -224,10 +230,19 @@ class InputLoader:
         df = pd.read_excel(self.excel, sheet_name="scenarios")
 
         # Validate required columns
-        required_cols = ['scenario_id', 'year', 'day_type']
+        required_cols = ['scenario_id', 'year', 'week_number']
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             raise ValueError(f"Scenarios sheet missing required columns: {missing}")
+
+        # Validate week_number
+        df['week_number'] = df['week_number'].astype(int)
+        invalid_weeks = df[~df['week_number'].between(1, 52)]
+        if not invalid_weeks.empty:
+            bad_ids = invalid_weeks['scenario_id'].tolist()
+            raise ValueError(
+                f"Scenarios {bad_ids} have week_number outside 1-52 range"
+            )
 
         # Add default demand_source if not present (backward compatible)
         if 'demand_source' not in df.columns:
@@ -244,6 +259,22 @@ class InputLoader:
                 f"Scenarios sheet has invalid demand_source values: {invalid_sources}. "
                 f"Must be one of {valid_sources}"
             )
+
+        # Handle optional enabled_sort_levels column (backward compatible)
+        if 'enabled_sort_levels' not in df.columns:
+            logger.info("No enabled_sort_levels column in scenarios - defaulting to all levels")
+        else:
+            # Validate values during load
+            for idx, row in df.iterrows():
+                raw = row.get('enabled_sort_levels')
+                try:
+                    parsed = parse_enabled_sort_levels(raw)
+                    logger.debug(
+                        f"Scenario '{row['scenario_id']}' enabled sort levels: "
+                        f"{[sl.value for sl in parsed]}"
+                    )
+                except ValueError as e:
+                    raise ValueError(f"Scenario '{row['scenario_id']}': {e}")
 
         logger.info(f"Loaded {len(df)} scenarios")
         return df
