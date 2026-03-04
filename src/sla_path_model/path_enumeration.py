@@ -1,6 +1,7 @@
 """Generate all candidate paths through the network."""
 from .config import (
-    Facility, FacilityType, PathCandidate, PathType, SortLevel, RunSettings
+    Facility, FacilityType, PathCandidate, PathType, SortLevel, RunSettings,
+    ALL_SORT_LEVELS
 )
 from .geo import haversine_miles, calculate_atw_factor, calculate_path_distance
 from .utils import setup_logging
@@ -10,10 +11,12 @@ logger = setup_logging()
 
 class PathEnumerator:
 
-    def __init__(self, facilities: dict[str, Facility], run_settings: RunSettings, injection_df):
+    def __init__(self, facilities: dict[str, Facility], run_settings: RunSettings,
+                 injection_df, enabled_sort_levels: frozenset = None):
         self.facilities = facilities
         self.max_path_touches = run_settings.max_path_touches
         self.max_atw_factor = run_settings.max_path_atw_factor
+        self.enabled_sort_levels = enabled_sort_levels if enabled_sort_levels is not None else ALL_SORT_LEVELS
 
         self._build_injection_facilities(injection_df)
         self._build_facility_lookups()
@@ -269,75 +272,45 @@ class PathEnumerator:
 
         # SORT_GROUP: Valid for any path
         # dest_sort_level = SORT_GROUP (no LM sort needed)
-        candidates.append(PathCandidate(
-            origin=origin,
-            dest=dest,
-            path_nodes=path_nodes,
-            path_type=path_type,
-            sort_level=SortLevel.SORT_GROUP,
-            dest_sort_level=SortLevel.SORT_GROUP,
-            total_path_miles=total_miles,
-            direct_miles=direct_miles,
-            atw_factor=atw_factor
-        ))
-
-        # MARKET: Valid for any path
-        # dest_sort_level = MARKET (LM sort needed)
-        candidates.append(PathCandidate(
-            origin=origin,
-            dest=dest,
-            path_nodes=path_nodes,
-            path_type=path_type,
-            sort_level=SortLevel.MARKET,
-            dest_sort_level=SortLevel.MARKET,
-            total_path_miles=total_miles,
-            direct_miles=direct_miles,
-            atw_factor=atw_factor
-        ))
-
-        # REGION: Valid when 2nd-to-last facility is destination's RSH,
-        # OR when destination itself IS an RSH
-        # NOT valid for direct paths from RSH to child (that's just MARKET/SORT_GROUP)
-
-        # Case 1: Multi-hop path where 2nd-to-last IS the destination's RSH
-        # Example: ATL02 → PHL01 → ABE01 (where ABE01.regional_sort_hub = PHL01)
-        # PHL01 does region-level sort, then ABE01 receives presorted freight
-        if dest_regional_hub and not is_direct and second_to_last == dest_regional_hub:
-            # Two variants based on how much sorting destination does:
-            # 1a. RSH sorts to market level, destination does sort_group→route (full LM sort)
+        if SortLevel.SORT_GROUP in self.enabled_sort_levels:
             candidates.append(PathCandidate(
                 origin=origin,
                 dest=dest,
                 path_nodes=path_nodes,
                 path_type=path_type,
-                sort_level=SortLevel.REGION,
-                dest_sort_level=SortLevel.MARKET,
-                total_path_miles=total_miles,
-                direct_miles=direct_miles,
-                atw_factor=atw_factor
-            ))
-            # 1b. RSH sorts to sort_group level, destination only does route sort (minimal LM sort)
-            candidates.append(PathCandidate(
-                origin=origin,
-                dest=dest,
-                path_nodes=path_nodes,
-                path_type=path_type,
-                sort_level=SortLevel.REGION,
+                sort_level=SortLevel.SORT_GROUP,
                 dest_sort_level=SortLevel.SORT_GROUP,
                 total_path_miles=total_miles,
                 direct_miles=direct_miles,
                 atw_factor=atw_factor
             ))
 
-        # Case 2: Destination IS an RSH (self-referencing or serves others)
-        # Example: ATL02 → PHL01 (where PHL01.regional_sort_hub = PHL01)
-        # PHL01 can handle region-level breakdown for itself
-        dest_is_rsh = dest in self.regional_hub_to_facilities
+        # MARKET: Valid for any path
+        # dest_sort_level = MARKET (LM sort needed)
+        if SortLevel.MARKET in self.enabled_sort_levels:
+            candidates.append(PathCandidate(
+                origin=origin,
+                dest=dest,
+                path_nodes=path_nodes,
+                path_type=path_type,
+                sort_level=SortLevel.MARKET,
+                dest_sort_level=SortLevel.MARKET,
+                total_path_miles=total_miles,
+                direct_miles=direct_miles,
+                atw_factor=atw_factor
+            ))
 
-        if dest_is_rsh:
-            # Destination can handle region-level breakdown for itself
-            if is_direct:
-                # Direct path to RSH: dest does region→sort_group + last mile
+        # REGION: Valid when 2nd-to-last facility is destination's RSH,
+        # OR when destination itself IS an RSH
+        # NOT valid for direct paths from RSH to child (that's just MARKET/SORT_GROUP)
+        if SortLevel.REGION in self.enabled_sort_levels:
+
+            # Case 1: Multi-hop path where 2nd-to-last IS the destination's RSH
+            # Example: ATL02 → PHL01 → ABE01 (where ABE01.regional_sort_hub = PHL01)
+            # PHL01 does region-level sort, then ABE01 receives presorted freight
+            if dest_regional_hub and not is_direct and second_to_last == dest_regional_hub:
+                # Two variants based on how much sorting destination does:
+                # 1a. RSH sorts to market level, destination does sort_group→route (full LM sort)
                 candidates.append(PathCandidate(
                     origin=origin,
                     dest=dest,
@@ -349,31 +322,68 @@ class PathEnumerator:
                     direct_miles=direct_miles,
                     atw_factor=atw_factor
                 ))
-            else:
-                # Multi-hop to RSH destination: dest does full sort + last mile
-                candidates.append(PathCandidate(
-                    origin=origin,
-                    dest=dest,
-                    path_nodes=path_nodes,
-                    path_type=path_type,
-                    sort_level=SortLevel.REGION,
-                    dest_sort_level=SortLevel.MARKET,
-                    total_path_miles=total_miles,
-                    direct_miles=direct_miles,
-                    atw_factor=atw_factor
-                ))
+                # 1b. RSH sorts to sort_group level, destination only does route sort (minimal LM sort)
+                # Only create this variant if SORT_GROUP is also enabled
+                if SortLevel.SORT_GROUP in self.enabled_sort_levels:
+                    candidates.append(PathCandidate(
+                        origin=origin,
+                        dest=dest,
+                        path_nodes=path_nodes,
+                        path_type=path_type,
+                        sort_level=SortLevel.REGION,
+                        dest_sort_level=SortLevel.SORT_GROUP,
+                        total_path_miles=total_miles,
+                        direct_miles=direct_miles,
+                        atw_factor=atw_factor
+                    ))
+
+            # Case 2: Destination IS an RSH (self-referencing or serves others)
+            # Example: ATL02 → PHL01 (where PHL01.regional_sort_hub = PHL01)
+            # PHL01 can handle region-level breakdown for itself
+            dest_is_rsh = dest in self.regional_hub_to_facilities
+
+            if dest_is_rsh:
+                # Destination can handle region-level breakdown for itself
+                if is_direct:
+                    # Direct path to RSH: dest does region→sort_group + last mile
+                    candidates.append(PathCandidate(
+                        origin=origin,
+                        dest=dest,
+                        path_nodes=path_nodes,
+                        path_type=path_type,
+                        sort_level=SortLevel.REGION,
+                        dest_sort_level=SortLevel.MARKET,
+                        total_path_miles=total_miles,
+                        direct_miles=direct_miles,
+                        atw_factor=atw_factor
+                    ))
+                else:
+                    # Multi-hop to RSH destination: dest does full sort + last mile
+                    candidates.append(PathCandidate(
+                        origin=origin,
+                        dest=dest,
+                        path_nodes=path_nodes,
+                        path_type=path_type,
+                        sort_level=SortLevel.REGION,
+                        dest_sort_level=SortLevel.MARKET,
+                        total_path_miles=total_miles,
+                        direct_miles=direct_miles,
+                        atw_factor=atw_factor
+                    ))
 
         return candidates
 
 
 def enumerate_all_paths(
         data: dict,
-        od_demands: list
+        od_demands: list,
+        enabled_sort_levels: frozenset = None
 ) -> dict[tuple[str, str], list[PathCandidate]]:
     enumerator = PathEnumerator(
         facilities=data["facilities"],
         run_settings=data["run_settings"],
-        injection_df=data["injection_distribution"]
+        injection_df=data["injection_distribution"],
+        enabled_sort_levels=enabled_sort_levels
     )
 
     # Separate DI (zone 0) from networked flows (zone 1+)
