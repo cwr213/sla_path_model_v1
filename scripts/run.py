@@ -19,7 +19,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from sla_path_model.config import DEFAULT_INPUT_FILE, DEFAULT_OUTPUT_FILE
+from sla_path_model.config import DEFAULT_INPUT_FILE, DEFAULT_OUTPUT_FILE, SortLevel, parse_enabled_sort_levels
 from sla_path_model.io_loader import InputLoader
 from sla_path_model.validators import validate_inputs
 from sla_path_model.demand_builder import build_od_demand
@@ -29,6 +29,16 @@ from sla_path_model.feasibility import check_all_feasibility
 from sla_path_model.reporting import build_all_reports
 from sla_path_model.write_outputs import write_outputs
 from sla_path_model.utils import setup_logging
+
+
+def build_scenario_sort_levels(scenarios_df) -> dict[str, frozenset]:
+    """Build mapping from scenario_id to its enabled sort levels."""
+    result = {}
+    for _, row in scenarios_df.iterrows():
+        scenario_id = str(row["scenario_id"])
+        raw = row.get("enabled_sort_levels") if "enabled_sort_levels" in scenarios_df.columns else None
+        result[scenario_id] = parse_enabled_sort_levels(raw)
+    return result
 
 
 def derive_output_filename(scenarios_df, output_dir: str = "outputs") -> str:
@@ -104,8 +114,13 @@ def main():
         logger.info("Step 3: Building OD demand...")
         od_demands = build_od_demand(data)
 
+        # Build per-scenario sort level config
+        scenario_sort_levels = build_scenario_sort_levels(data["scenarios"])
+        global_enabled_levels = frozenset().union(*scenario_sort_levels.values())
+        logger.info(f"Enabled sort levels (global union): {sorted(sl.value for sl in global_enabled_levels)}")
+
         logger.info("Step 4: Enumerating paths...")
-        od_paths = enumerate_all_paths(data, od_demands)
+        od_paths = enumerate_all_paths(data, od_demands, enabled_sort_levels=global_enabled_levels)
 
         logger.info("Step 5: Calculating path timings...")
         od_timings = calculate_all_path_timings(data, od_paths)
@@ -122,7 +137,8 @@ def main():
         reports = build_all_reports(
             od_demands,
             od_timings,
-            top_paths_per_sort_level=run_settings.top_paths_per_sort_level
+            top_paths_per_sort_level=run_settings.top_paths_per_sort_level,
+            scenario_sort_levels=scenario_sort_levels
         )
 
         logger.info("Step 8: Writing outputs...")

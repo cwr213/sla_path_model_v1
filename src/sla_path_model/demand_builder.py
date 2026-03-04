@@ -10,7 +10,7 @@ Supports two demand sources (controlled by demand_source in scenarios sheet):
    - Destination distribution from zips population
 
 2. MARKET: Commercial forecast at market-to-market level
-   - Input from market_demand sheet: origin_market, dest_market, year, day_type, pkgs_day
+   - Input from market_demand sheet: origin_market, dest_market, year, week_number, pkgs_day
    - Market -> Facility mapping is 1:1 via facilities.market column
    - Flow type inferred: O=D -> DIRECT_INJECTION (zone 0), O≠D -> MIDDLE_MILE (zone from mileage bands)
    - DI/ZS splits already baked into commercial forecast
@@ -210,37 +210,28 @@ class DemandBuilder:
             )
         return self.injection_shares_by_year[year]
 
-    def _get_demand_params(self, year: int, day_type: str) -> dict:
-        """Get demand parameters for year/day_type."""
-        year_demand = self.demand_df[self.demand_df["year"] == year]
+    def _get_demand_params(self, year: int, week_number: int) -> dict:
+        """Get demand parameters for year/week_number."""
+        mask = (self.demand_df["year"] == year) & (self.demand_df["week_number"] == week_number)
+        week_demand = self.demand_df[mask]
 
-        if len(year_demand) == 0:
-            raise ValueError(f"No demand data for year {year}")
+        if len(week_demand) == 0:
+            raise ValueError(f"No demand data for year={year}, week_number={week_number}")
 
-        row = year_demand.iloc[0]
-        annual_pkgs = float(row['annual_pkgs'])
-
-        if day_type == "peak":
-            pct_of_annual = float(row['peak_pct_of_annual'])
-            mm_share = float(row['middle_mile_share_peak'])
-            zs_share = float(row['zone_skip_share_peak'])
-            di_share = float(row['direct_injection_share_peak'])
-        else:
-            pct_of_annual = float(row['offpeak_pct_of_annual'])
-            mm_share = float(row['middle_mile_share_offpeak'])
-            zs_share = float(row['zone_skip_share_offpeak'])
-            di_share = float(row['direct_injection_share_offpeak'])
+        row = week_demand.iloc[0]
+        daily_pkgs = float(row['daily_pkgs'])
+        mm_share = float(row['mm_share'])
+        zs_share = float(row['zs_share'])
+        di_share = float(row['di_share'])
 
         # Validate shares sum to 1.0
         total_share = mm_share + zs_share + di_share
         if abs(total_share - 1.0) > 0.01:
             raise ValueError(
                 f"Flow shares must sum to 1.0, got {total_share:.4f} "
-                f"(mm={mm_share}, zs={zs_share}, di={di_share})"
+                f"(mm={mm_share}, zs={zs_share}, di={di_share}) "
+                f"for year={year}, week={week_number}"
             )
-
-        # pct_of_annual is daily rate (fraction of annual that flows on this day type)
-        daily_pkgs = annual_pkgs * pct_of_annual
 
         return {
             'daily_pkgs': daily_pkgs,
@@ -272,18 +263,18 @@ class DemandBuilder:
         for _, scenario in self.scenarios_df.iterrows():
             scenario_id = str(scenario["scenario_id"])
             year = int(scenario["year"])
-            day_type = str(scenario["day_type"]).lower().strip()
+            week_number = int(scenario["week_number"])
             demand_source = str(scenario.get("demand_source", "population")).lower().strip()
 
             logger.info(
                 f"Building demand for scenario {scenario_id} "
-                f"(year={year}, {day_type}, source={demand_source})"
+                f"(year={year}, week={week_number}, source={demand_source})"
             )
 
             if demand_source == DemandSource.MARKET.value:
-                scenario_demands = self._build_from_market(scenario_id, year, day_type)
+                scenario_demands = self._build_from_market(scenario_id, year, week_number)
             else:
-                scenario_demands = self._build_from_population(scenario_id, year, day_type)
+                scenario_demands = self._build_from_population(scenario_id, year, week_number)
 
             demands.extend(scenario_demands)
 
@@ -294,7 +285,7 @@ class DemandBuilder:
             self,
             scenario_id: str,
             year: int,
-            day_type: str
+            week_number: int
     ) -> list[ODDemand]:
         """
         Build OD demand from commercial forecast (market_demand sheet).
@@ -312,16 +303,16 @@ class DemandBuilder:
                 f"market_demand sheet found in input file"
             )
 
-        # Filter forecast to this year/day_type
+        # Filter forecast to this year/week_number
         mask = (
             (self.market_demand_df['year'] == year) &
-            (self.market_demand_df['day_type'].str.lower() == day_type)
+            (self.market_demand_df['week_number'] == week_number)
         )
         forecast = self.market_demand_df[mask]
 
         if forecast.empty:
             raise ValueError(
-                f"No market_demand data for year={year}, day_type={day_type}"
+                f"No market_demand data for year={year}, week_number={week_number}"
             )
 
         demands = []
@@ -369,7 +360,7 @@ class DemandBuilder:
                 pkgs_day=pkgs_day,
                 zone=zone,
                 flow_type=flow_type,
-                day_type=day_type
+                week_number=week_number
             ))
 
         # Log warnings for unmapped markets
@@ -413,7 +404,7 @@ class DemandBuilder:
             self,
             scenario_id: str,
             year: int,
-            day_type: str
+            week_number: int
     ) -> list[ODDemand]:
         """
         Build OD demand from population-based approach.
@@ -430,7 +421,7 @@ class DemandBuilder:
                 f"column found in zips sheet. Available years: {self.available_years}"
             )
 
-        params = self._get_demand_params(year, day_type)
+        params = self._get_demand_params(year, week_number)
         daily_pkgs = params['daily_pkgs']
 
         if daily_pkgs <= 0:
@@ -444,7 +435,7 @@ class DemandBuilder:
                 f"Check that facility_{year} column has valid facility names."
             )
 
-        scenario_demands = self._build_od_matrix(scenario_id, params, day_type, dest_shares, year)
+        scenario_demands = self._build_od_matrix(scenario_id, params, week_number, dest_shares, year)
 
         # Log summary by flow type
         mm_pkgs = sum(d.pkgs_day for d in scenario_demands if d.flow_type == FlowType.MIDDLE_MILE)
@@ -468,7 +459,7 @@ class DemandBuilder:
             self,
             scenario_id: str,
             params: dict,
-            day_type: str,
+            week_number: int,
             dest_shares: dict[str, float],
             year: int
     ) -> list[ODDemand]:
@@ -493,7 +484,7 @@ class DemandBuilder:
                     pkgs_day=di_pkgs,
                     zone=0,
                     flow_type=FlowType.DIRECT_INJECTION,
-                    day_type=day_type
+                    week_number=week_number
                 ))
 
         # 2. ZONE SKIP: Origin = regional_sort_hub of dest, Dest = facility assigned for year
@@ -527,7 +518,7 @@ class DemandBuilder:
                     pkgs_day=zs_pkgs,
                     zone=zone,
                     flow_type=FlowType.ZONE_SKIP,
-                    day_type=day_type
+                    week_number=week_number
                 ))
 
         # 3. MIDDLE MILE: Origin = per injection_distribution (year-specific), Dest = per population
@@ -565,7 +556,7 @@ class DemandBuilder:
                         pkgs_day=od_pkgs,
                         zone=zone,
                         flow_type=FlowType.MIDDLE_MILE,
-                        day_type=day_type
+                        week_number=week_number
                     ))
 
         return demands
